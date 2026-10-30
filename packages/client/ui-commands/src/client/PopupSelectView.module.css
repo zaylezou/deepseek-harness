@@ -35,6 +35,11 @@
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  /* Touch scrolling belongs to the list, and stops at its edges: without these
+     a drag on a phone scrolls the page behind the card instead. */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .row {

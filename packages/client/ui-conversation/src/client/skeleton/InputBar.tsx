@@ -305,8 +305,11 @@ export const InputBar = memo(function InputBar({
   // Button presses steal focus from the editor; suppress at mousedown so
   // typing continues seamlessly. Lexical's focus() carries preventScroll and
   // restores the previous selection, so no reveal is needed: the caret has
-  // not moved, and the next keystroke gets the browser's native one.
+  // not moved, and the next keystroke gets the browser's native one. A touch
+  // press is not typing: refocusing there only reopens the soft keyboard over
+  // the panel the button just opened, so the touch path leaves focus alone.
   const keepFocus = (e: MouseEvent<HTMLButtonElement>): void => {
+    if (isMobileDevice()) return
     keepDraftFocus(e, editor)
   }
 
@@ -329,8 +332,10 @@ export const InputBar = memo(function InputBar({
     // The menu is a combobox over the editor, so the keyboard has to be there
     // before the launcher opens it: activating the button from the keyboard
     // leaves focus on the button, and restoring it afterwards would re-track an
-    // empty draft and close the menu again.
-    if (editor !== null) focusDraftEditor(editor, revealSelection)
+    // empty draft and close the menu again. On a touch device the menu opens as
+    // a plain list instead — focusing the editor there pops the soft keyboard
+    // over the list the tap just asked for.
+    if (editor !== null && !isMobileDevice()) focusDraftEditor(editor, revealSelection)
     toggleCommandMenu?.(keyboard.caretSpan())
   }
 
