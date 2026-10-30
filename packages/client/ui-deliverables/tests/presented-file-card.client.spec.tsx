@@ -14,6 +14,7 @@ const props = () => {
     file: { path: 'out/report.pdf', description: 'Final report', seq: 4, index: 1 },
     host: { name: 'remote-desktop', available: true, fileManager: 'finder' as const },
     phase: undefined,
+    downloadUrl: 'api/present.download?sessionId=owner&seq=4&index=1',
     onPreview: vi.fn(),
     onMenu, contextMenuProps: contextMenuHook((_target, point) => { onMenu(point) })()
       .getTriggerProps({ kind: 'image', value: { url: 'unused' } }),
@@ -75,4 +76,20 @@ it('renders the supplied action independently from the card preview', () => {
   expect(p.onMenu).toHaveBeenCalledWith({ x: 26, y: 37 })
   fireEvent.click(view.getByRole('button', { name: 'Preview out/report.pdf in sidebar' }))
   expect(p.onPreview).toHaveBeenCalledOnce()
+})
+
+
+it('downloads the declared file through its own same-origin route without the native action menu', () => {
+  const p = props()
+  const view = render(<PresentedFileCard {...p} />)
+  const link = view.getByRole('link', { name: 'Download report.pdf' }) as HTMLAnchorElement
+  expect(link.getAttribute('href')).toBe(p.downloadUrl)
+  expect(link.getAttribute('download')).toBe('report.pdf')
+})
+
+it('keeps the download available when the Host has no desktop', () => {
+  const p = props()
+  const view = render(<PresentedFileCard {...p} host={{ ...p.host, available: false }} actions={null} />)
+  expect(view.getByRole('link', { name: 'Download report.pdf' })).toBeTruthy()
+  expect(view.queryByRole('button', { name: 'Native file action' })).toBeNull()
 })

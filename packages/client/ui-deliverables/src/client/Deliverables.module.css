@@ -32,4 +32,12 @@
 }
 .toggle svg { flex: none; width: 14px; height: 14px; }
 @container (max-width: 620px) { .presented { grid-template-columns: minmax(0, 1fr); } }
-.actions { display: inline-flex; flex: none; pointer-events: auto; }
+.actions { display: inline-flex; flex: none; gap: 4px; align-items: center; pointer-events: auto; }
+/* The browser download link matches the native split control's hairline pill
+   so a Host without a desktop still shows one primary file action. */
+.download { display: inline-flex; box-sizing: border-box; align-items: center; gap: 4px; height: 24px; padding: 3px 7px; overflow: hidden; border: 0.5px solid var(--dsw-alias-border-l4); border-radius: var(--dsw-radius-sm); color: var(--dsw-alias-label-primary); font-size: 11px; line-height: 16px; white-space: nowrap; text-decoration: none; }
+.download:focus-visible { background: var(--dsw-alias-interactive-bg-hover); outline: none; }
+@media (hover: hover) {
+  .download:hover { background: var(--dsw-alias-interactive-bg-hover); }
+}
+.download svg { flex: none; }

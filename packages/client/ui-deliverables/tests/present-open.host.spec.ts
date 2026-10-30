@@ -13,7 +13,7 @@ import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import type { SessionEventReadRequest } from '@deepseek-ai/dsh-session-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerPresentOpen } from '../src/present-open.ts'
-import { presentedFileUrl, PRESENT_OPEN_PATH } from '../src/presented.ts'
+import { basename, presentedDownloadUrl, presentedFileUrl, PRESENT_DOWNLOAD_PATH, PRESENT_OPEN_PATH } from '../src/presented.ts'
 
 const cleanups: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -55,8 +55,12 @@ async function fixture() {
   const open = (query = '?sessionId=owner&seq=7&index=0', signal?: AbortSignal) => handler.fetch(new Request(
     `http://localhost${PRESENT_OPEN_PATH}${query}`, { method: 'POST', signal: signal ?? null },
   ), connection.browserPeer)
+  const download = (query = '?sessionId=owner&seq=7&index=0', signal?: AbortSignal) => handler.fetch(new Request(
+    `http://localhost${PRESENT_DOWNLOAD_PATH}${query}`, { method: 'GET', signal: signal ?? null },
+  ), connection.browserPeer)
   return {
-    browserPeer: connection.browserPeer, applications, root, cwd, ctx, fiber, file, session, readEvent, open, opener, handler, resolveAgent,
+    browserPeer: connection.browserPeer, applications, root, cwd, ctx, fiber, file, session,
+    readEvent, open, download, opener, handler, resolveAgent,
   }
 }
 
@@ -66,7 +70,6 @@ describe('Presented workspace file native open route', () => {
     const source = await realpath(join(cwd, file.path))
     expect(presentedFileUrl(SessionId('owner'), 7, 0)).toBe('api/present.open?sessionId=owner&seq=7&index=0')
     expect((await handler.fetch(new Request(`http://localhost${PRESENT_OPEN_PATH}`), browserPeer)).status).toBe(400)
-    expect((await handler.fetch(new Request('http://localhost/api/present.download?sessionId=owner&seq=7&index=0'), browserPeer)).status).toBe(404)
     for (const contents of ['current source', 'edited source']) {
       await writeFile(source, contents)
       const response = await open()
@@ -251,4 +254,76 @@ it('queries handlers only after file authorization and forwards explicit applica
   vi.spyOn(ctx.fs, 'processPathFromHostPath').mockReturnValue(undefined)
   expect((await handler.fetch(new Request(url), browserPeer)).status).toBe(422)
   expect(applications).toHaveBeenCalledOnce()
+})
+
+
+describe('Presented workspace file download route', () => {
+  it('streams the current source as an attachment without a Host desktop', async () => {
+    const { ctx, download, file, open } = await fixture()
+    vi.spyOn(ctx.sessionController, 'workspaceDesktop').mockReturnValue({ name: 'desktop', available: false, fileManager: 'finder' })
+    expect((await open()).status).toBe(409)
+    expect(presentedDownloadUrl(SessionId('owner'), 7, 0)).toBe('api/present.download?sessionId=owner&seq=7&index=0')
+    const response = await download()
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    const disposition = response.headers.get('content-disposition') ?? ''
+    expect(disposition).toMatch(/^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''/)
+    expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(basename(file.path))}`)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(Uint8Array.of(80, 75, 0, 255))
+  })
+
+  it.each([
+    ['report.pdf', 'application/pdf'],
+    ['notes.md', 'text/markdown; charset=utf-8'],
+    ['screen.SHOT.PNG', 'image/png'],
+    ['bundle.tgz', 'application/gzip'],
+    ['dsh-0.1.0.apk', 'application/vnd.android.package-archive'],
+    ['model.bin', 'application/octet-stream'],
+  ])('names each extension its own media type: %s -> %s', async (name, mediaType) => {
+    const { cwd, file, download } = await fixture()
+    await writeFile(join(cwd, file.path), '')
+    await unlink(join(cwd, file.path))
+    file.path = name
+    await writeFile(join(cwd, name), 'payload')
+    const response = await download()
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe(mediaType)
+    const disposition = response.headers.get('content-disposition') ?? ''
+    expect(disposition).toMatch(/^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''/)
+    expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(basename(name))}`)
+    expect(await response.text()).toBe('payload')
+  })
+
+  it('streams several read windows to the last short one', async () => {
+    const { cwd, file, download } = await fixture()
+    const bytes = new Uint8Array(3 * 1024 * 1024 + 7)
+    for (let at = 0; at < bytes.length; at += 1) bytes[at] = at % 251
+    await writeFile(join(cwd, file.path), bytes)
+    const response = await download()
+    expect(response.status).toBe(200)
+    // Compare bytes instead of element-wise deep equality: a 3 MiB diff costs seconds.
+    expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(bytes))).toBe(true)
+  })
+
+  it('rejects invalid coordinates before reading and undeclared files after', async () => {
+    const { download, readEvent } = await fixture()
+    for (const query of ['', '?sessionId=owner&index=0', '?sessionId=owner&seq=7',
+      '?sessionId=owner&seq=-1&index=0', '?sessionId=owner&seq=7&index=0.5']) {
+      expect((await download(query)).status).toBe(400)
+    }
+    expect(readEvent).not.toHaveBeenCalled()
+    expect((await download('?sessionId=other&seq=7&index=0')).status).toBe(404)
+    expect((await download('?sessionId=owner&seq=7&index=1')).status).toBe(404)
+  })
+
+  it('refuses an unmapped Host path and reports a removed source', async () => {
+    const { ctx, download, cwd, file } = await fixture()
+    vi.spyOn(ctx.fs, 'processPathFromHostPath').mockReturnValue(undefined)
+    expect((await download()).status).toBe(422)
+    vi.restoreAllMocks()
+    await unlink(join(cwd, file.path))
+    expect((await download()).status).toBe(404)
+  })
 })

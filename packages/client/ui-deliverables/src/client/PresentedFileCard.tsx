@@ -1,8 +1,8 @@
 import type { ContextMenuTriggerProps } from '@deepseek-ai/dsh-client-ui-context-menu/client'
-/** File identity, Sidebar preview, and contributed native actions for one delivery. */
+/** File identity, Sidebar preview, a browser download, and contributed native actions for one delivery. */
 import type { ReactNode } from 'react'
 import { resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
-import { FileTypeIcon, fileExtension } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FileTypeIcon, IconDownloadOutlineRegular, fileExtension } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PresentedHost } from '../presented.ts'
 import type { PresentedOpenPhase } from './present-open.ts'
@@ -17,14 +17,17 @@ function cardDescription(description: string | undefined, fallback: string): str
 
 /**
  * Render independent file actions without nesting buttons inside a clickable card.
- * @param props - durable file metadata, Sidebar preview, Host capabilities, gesture status, and localized copy.
- * @returns the file card and its anchored action menu.
+ * The download is a plain same-origin link, so the browser owns streaming and
+ * progress and the route still authorizes through the viewed Session.
+ * @param props - durable file metadata, Sidebar preview, download route, Host capabilities, gesture status, and localized copy.
+ * @returns the file card, its download link, and its anchored action menu.
  */
-export function PresentedFileCard({ file, cwd, phase, host, onPreview, contextMenuProps, actions, t }: {
+export function PresentedFileCard({ file, cwd, phase, host, downloadUrl, onPreview, contextMenuProps, actions, t }: {
   file: PresentedPath
   cwd: string | undefined
   phase: PresentedOpenPhase | undefined
   host: PresentedHost | null
+  downloadUrl: string
   onPreview: () => void
   contextMenuProps: ContextMenuTriggerProps
   actions: ReactNode
@@ -52,7 +55,14 @@ export function PresentedFileCard({ file, cwd, phase, host, onPreview, contextMe
           <span className={css.previewHint}>{t('presented.preview')}</span>
         </span>
       </div>
-      <div className={css.actions}>{actions}</div>
+      <div className={css.actions}>
+        <a className={css.download} href={downloadUrl} download={name}
+          title={t('presented.downloadAria', { name })} aria-label={t('presented.downloadAria', { name })}>
+          <IconDownloadOutlineRegular size={14} />
+          <span>{t('presented.download')}</span>
+        </a>
+        {actions}
+      </div>
     </div>
   </div>
 }
