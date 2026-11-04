@@ -13,6 +13,8 @@ examples/*/*.jsonl
 .storages/
 .sessions/
 examples/*/.sessions/
+# This checkout's own run logs (the dsh-qq plugin writes daily files here).
+/logs/
 coverage/
 .coverage-times.json
 .doc-typecheck-*/
