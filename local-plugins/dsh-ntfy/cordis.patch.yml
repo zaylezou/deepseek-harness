@@ -1,0 +1,26 @@
+# dsh-ntfy bundle patch
+#
+# 通过 `dsh plugin --profile <name> add dsh-ntfy`（或 profile 里加 link 依赖）安装后，
+# dsh 启动时自动加载本 patch，把 dsh-ntfy 插进插件树。
+#
+# 叠加顺序：dsh-base → 本 bundle patch → profile cordis.patch.yml → --patch
+# 后层是「整行替换 config」，不是深合并；要覆盖这里某个键，请把整块 config 重写一遍。
+#
+# 这里只放占位值。真正的 url / topic / accessToken 属于部署配置，写在
+# <profile>/cordis.patch.yml 里覆盖整块 config —— ntfy 的 topic 等同于口令，
+# 不该跟着仓库走。
+
+- insert:
+    - id: dsh-ntfy
+      # ⚠️ 必须等于 package.json 的 name
+      name: 'dsh-ntfy'
+      config:
+        # ntfy 服务根地址（不带 topic）
+        url: 'https://ntfy.example.com'
+        # 推送频道名；留空 = 工具能注册但调用会报「没配 topic」
+        topic: ''
+        # 服务端开了访问控制（auth-users / ACL）时填 access token；留空 = 匿名发布
+        accessToken: ''
+        defaultPriority: 'default'
+        defaultTags: []
+        timeoutMs: 10000

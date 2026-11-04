@@ -1,0 +1,32 @@
+{
+  "name": "dsh-ntfy",
+  "version": "0.1.0",
+  "description": "ntfy push notifications for DeepSeek Harness — lets the agent send you a phone notification through a self-hosted ntfy server.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "ntfy",
+    "notification",
+    "push"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

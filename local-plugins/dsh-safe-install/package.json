@@ -1,0 +1,20 @@
+{
+  "name": "dsh-safe-install",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trial-boot every plugin install before it touches the real profile: wraps the plugin manager so the Web UI and the plugin_manager tool both verify the plugin in a throwaway DSH_HOME first.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  }
+}

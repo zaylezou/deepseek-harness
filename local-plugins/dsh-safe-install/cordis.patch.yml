@@ -1,0 +1,10 @@
+# dsh-safe-install bundle layer: insert the gate plugin.
+#
+# The trial runner ships at ./dsh-safe-install.sh beside this file, and the
+# plugin resolves that from its own location, so nothing here names a machine.
+# Set `script:` only to point the gate at another copy.
+- insert:
+    - id: dsh-safe-install
+      name: 'dsh-safe-install'
+      config:
+        timeoutMs: 240000
