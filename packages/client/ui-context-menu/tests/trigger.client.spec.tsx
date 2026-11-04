@@ -10,6 +10,11 @@ import { createContextMenuBindings } from '../src/client/trigger.ts'
 import type { ContextMenuTriggerProps, ContextMenuTarget } from '../src/client/types.ts'
 
 afterEach(cleanup)
+/** jsdom ships no PointerEvent; a plain bubbling Event carrying the fields React reads is enough. */
+const pointer = (type: string, init: Record<string, unknown>): Event => Object.assign(
+  new Event(type, { bubbles: true, cancelable: true }),
+  { pointerType: 'touch', isPrimary: true, button: 0, clientX: 0, clientY: 0, ...init },
+)
 const target = (id: string): ContextMenuTarget => ({ kind: 'session', value: { sessionId: SessionId(id), displayTitle: id } })
 
 it('binds targets in loops, captures deferred identity before focus changes it, and composes existing handlers', () => {
@@ -97,4 +102,53 @@ it('injects the hook through the root Slot and withdraws both its prop and retai
   expect(fireEvent.contextMenu(detached.getByRole('button'))).toBe(true)
   expect(fireEvent.keyDown(detached.getByRole('button'), { key: 'ContextMenu' })).toBe(true)
   expect(source.getSnapshot()).toBeNull()
+})
+
+it('opens on a touch hold, swallows the click that ends it, and keeps later taps', () => {
+  vi.useFakeTimers()
+  onTestFinished(() => { vi.useRealTimers() })
+  const open = vi.fn(), tapped = vi.fn()
+  const { getTriggerProps } = createContextMenuBindings(open, () => true)
+  const view = render(<button {...getTriggerProps(target('held'))} onClick={tapped}>Held</button>)
+  const button = view.getByRole('button', { name: 'Held' })
+  fireEvent(button, pointer('pointerdown', { clientX: 8, clientY: 9 }))
+  fireEvent(button, pointer('pointermove', { clientX: 11, clientY: 12 }))
+  act(() => { vi.advanceTimersByTime(499) })
+  expect(open).not.toHaveBeenCalled()
+  act(() => { vi.advanceTimersByTime(1) })
+  expect(open).toHaveBeenCalledWith(target('held'), { x: 11, y: 12 })
+  fireEvent.click(button)
+  expect(tapped).not.toHaveBeenCalled()
+  act(() => { vi.advanceTimersByTime(400) })
+  fireEvent.click(button)
+  expect(tapped).toHaveBeenCalledOnce()
+})
+
+it('abandons a hold once the finger travels, leaving the tap intact', () => {
+  vi.useFakeTimers()
+  onTestFinished(() => { vi.useRealTimers() })
+  const open = vi.fn(), tapped = vi.fn()
+  const { getTriggerProps } = createContextMenuBindings(open, () => true)
+  const view = render(<button {...getTriggerProps(target('panned'))} onClick={tapped}>Panned</button>)
+  const button = view.getByRole('button', { name: 'Panned' })
+  fireEvent(button, pointer('pointerdown', { clientX: 5, clientY: 5 }))
+  fireEvent(button, pointer('pointermove', { clientX: 40, clientY: 5 }))
+  act(() => { vi.advanceTimersByTime(600) })
+  expect(open).not.toHaveBeenCalled()
+  fireEvent.click(button)
+  expect(tapped).toHaveBeenCalledOnce()
+})
+
+it('keeps mouse presses and extra fingers out of the hold gesture', () => {
+  vi.useFakeTimers()
+  onTestFinished(() => { vi.useRealTimers() })
+  const open = vi.fn()
+  const { getTriggerProps } = createContextMenuBindings(open, () => true)
+  const view = render(<button {...getTriggerProps(target('mouse'))}>Mouse</button>)
+  const button = view.getByRole('button', { name: 'Mouse' })
+  fireEvent(button, pointer('pointerdown', { pointerType: 'mouse' }))
+  fireEvent(button, pointer('pointerdown', { isPrimary: false }))
+  fireEvent(button, pointer('pointerdown', { button: 2 }))
+  act(() => { vi.advanceTimersByTime(600) })
+  expect(open).not.toHaveBeenCalled()
 })

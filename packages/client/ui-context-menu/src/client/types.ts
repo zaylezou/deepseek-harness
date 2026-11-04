@@ -6,7 +6,8 @@ import type { PaneId, TabRecord } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { HTMLAttributes } from 'react'
 
 /** DOM handlers bound to an explicit object; existing handlers can prevent menu activation. */
-export type ContextMenuTriggerProps = Pick<HTMLAttributes<HTMLElement>, 'onContextMenu' | 'onKeyDown' | 'tabIndex'>
+export type ContextMenuTriggerProps = Pick<HTMLAttributes<HTMLElement>,
+  'onContextMenu' | 'onKeyDown' | 'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onPointerLeave' | 'tabIndex'>
 
 /** Functions supplied by the globally injected useContextMenu hook. */
 export interface ContextMenuBindings {
