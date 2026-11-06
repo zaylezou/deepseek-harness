@@ -142,7 +142,12 @@ window.__ModuleLoader__.load({
 .dsh-pt-option-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-pt-badge{flex:none;color:var(--dsw-alias-label-tertiary);font-size:8px;line-height:10px;font-weight:500;letter-spacing:.2px}
 @container (max-width:460px){.dsh-pt-trigger:has(.dsh-pt-icon) .dsh-pt-label{display:none}}
-.dsh-pt-extra{display:flex;justify-content:flex-end;gap:8px;padding:0 16px 14px}
+.dsh-pt-extra{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding:0 16px 14px}
+/* The stock action row does not wrap; with four buttons a phone squeezes the
+   labels into vertical stacks and the row runs past the card edge. Marking the
+   row from the component (not :has) keeps this working on older WebViews. */
+[data-dsh-pt-row]{flex-wrap:wrap}
+.dsh-pt-action{white-space:nowrap}
 `
 
     /** Toast node and its timers, shared by every feedback path. */
@@ -445,6 +450,9 @@ window.__ModuleLoader__.load({
           // element carrying the module's readable `actionRow` class suffix.
           React.useLayoutEffect(() => {
             const next = wrap.current === null ? null : wrap.current.querySelector('[class*="actionRow"]')
+            // The stock row must wrap once four buttons share it; the marker
+            // keeps that rule out of every other approval card.
+            next?.setAttribute('data-dsh-pt-row', '')
             setRow(current => (current === next ? current : next))
           })
           const act = (preset) => {
@@ -468,10 +476,12 @@ window.__ModuleLoader__.load({
           const disabled = pending !== null || !approval.answerable
           const buttons = [
             h(Button, {
-              key: 'full', variant: 'outline', disabled, onClick: () => { act(FULL_PRESET) },
+              key: 'full', variant: 'outline', className: 'dsh-pt-action', disabled,
+              onClick: () => { act(FULL_PRESET) },
             }, t('approval.full')),
             h(Button, {
-              key: 'auto', variant: 'outline', disabled, onClick: () => { act(AUTO_PRESET) },
+              key: 'auto', variant: 'outline', className: 'dsh-pt-action', disabled,
+              onClick: () => { act(AUTO_PRESET) },
             }, t('approval.auto')),
           ]
           const reason = approval.displayReason === undefined
