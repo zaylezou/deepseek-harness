@@ -148,6 +148,13 @@ window.__ModuleLoader__.load({
    row from the component (not :has) keeps this working on older WebViews. */
 [data-dsh-pt-row]{flex-wrap:wrap}
 .dsh-pt-action{white-space:nowrap}
+/* Phones: an even 2x2 grid reads as one dialog footer. Equal tracks, one line
+   per label, and a compact control size keep the longest label ("switch to
+   full access and allow") inside its cell down to ~320px. */
+@media (max-width: 520px){
+  [data-dsh-pt-row]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  [data-dsh-pt-row] > *{width:100%;min-width:0;height:34px;padding:0 8px;font-size:12px;line-height:18px;white-space:nowrap}
+}
 `
 
     /** Toast node and its timers, shared by every feedback path. */
