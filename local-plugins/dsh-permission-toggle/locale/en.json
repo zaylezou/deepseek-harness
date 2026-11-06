@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Permission toggle",
+    "description": "Tab in the composer flips between Full access and the previous permission preset, writing through /permission so enabling Full access skips the risk dialog."
+  }
+}

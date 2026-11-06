@@ -1,0 +1,32 @@
+{
+  "name": "dsh-permission-toggle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One key in the composer toggles between Full access and the previous permission preset, writing through /permission so enabling Full access never shows the risk dialog.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

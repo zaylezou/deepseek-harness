@@ -1,0 +1,9 @@
+# dsh-permission-toggle bundle patch
+#
+# One row: the browser half (./client) owns the composer's Tab toggle; the Host
+# half is a no-op so the package can be an ordinary plugin row. Remove this row
+# (or the bundle entry in the profile) to restore the stock permission gate.
+
+- insert:
+    - id: permission-toggle
+      name: 'dsh-permission-toggle'

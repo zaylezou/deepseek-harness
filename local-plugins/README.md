@@ -4,13 +4,16 @@ Fork-local DSH plugins and the local patch registry, kept in this checkout so
 they travel with it. They are **not** part of the pnpm workspace:
 `pnpm-workspace.yaml` only globs `packages/*/*`, and keeping them out means
 `pnpm run build`, `pnpm run typecheck` and the workspace constraint checks never
-see them. Both plugins are dependency-free single-package ESM, loaded by a
+see them. Each plugin is a dependency-free single-package ESM, loaded by a
 profile directly.
 
 | Path | What it does |
 | --- | --- |
 | `dsh-ntfy/` | Publish notifications to the phone over a self-hosted ntfy server (`ntfy_send`, `ntfy_send_file`). See `dsh-ntfy/docs/publish.md`. |
 | `dsh-safe-install/` | Gate every plugin install behind a trial boot. Wraps `pluginManager.installBundle`; `dsh-safe-install.sh` beside it does the throwaway-`DSH_HOME` install, boot, and probes. |
+| `dsh-composer-enter-newline/` | Configurable composer send keys (Enter / Shift+Enter / Ctrl+Enter → newline, queue, or force send) plus the General-settings row that replaces the stock busy-Enter selector. |
+| `dsh-question-landscape/` | Landscape rail for the `ask_user_question` card: dock the pending card right, keep the composer at the bottom, and offer a direct reply affordance. |
+| `dsh-permission-toggle/` | Tab in the composer flips the session between Full access and its previous preset, writing through `/permission` so enabling Full access skips the risk dialog. |
 | `patches/` | The local patch registry: which installed files this profile edits (`dsh-webui-auth`, `dsh-restart-anywhere`) and the patchers that re-derive them after an upgrade. `dsh-safe-install.sh` reads it from here. |
 
 ## Nothing names a machine
