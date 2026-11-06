@@ -24,3 +24,10 @@
         defaultPriority: 'default'
         defaultTags: []
         timeoutMs: 10000
+        # 审批转发：页面上的审批超过 approvalDelayMs 没人处理，就推手机，
+        # 通知上带「通过 / 拒绝」按钮。默认关，需要时在 profile 里开。
+        approvalEnabled: false
+        # 等待多久没人处理才推送（毫秒）；默认 5 分钟
+        approvalDelayMs: 300000
+        # 手机能访问到的 DSH 地址，用于按钮回调；留空则不启用审批转发
+        approvalBaseUrl: ''

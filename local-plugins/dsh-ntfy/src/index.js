@@ -1,4 +1,5 @@
 import Schema from '@deepseek-ai/schemastery'
+import { randomBytes } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 
@@ -30,6 +31,15 @@ export const Config = Schema.object({
   timeoutMs: Schema.number()
     .default(10000)
     .description('单次推送超时，单位毫秒'),
+  approvalEnabled: Schema.boolean()
+    .default(false)
+    .description('开启审批转发：页面上的审批超过 delay 没人处理，就推到手机，通知上带「通过 / 拒绝」按钮'),
+  approvalDelayMs: Schema.number()
+    .default(300000)
+    .description('审批等待多久没人处理才推送，单位毫秒（默认 5 分钟）'),
+  approvalBaseUrl: Schema.string()
+    .default('')
+    .description('手机能访问到的 DSH 地址（用于审批按钮回调），例如 https://dsh.example.com；留空则不启用审批转发'),
 })
 
 const PRIORITIES = ['min', 'low', 'default', 'high', 'urgent']
@@ -90,6 +100,205 @@ function authHeaders(config) {
 
 async function errorText(res) {
   try { return (await res.text()).slice(0, 300) } catch { return '' }
+}
+
+/**
+ * Publish one JSON message to the ntfy root endpoint.
+ *
+ * JSON publishing must POST to `/` (the topic lives in the body) and `cache=no`
+ * can only ride the query string — see README. Both the tools and the approval
+ * relay go through here so the two paths cannot drift.
+ * @param config - plugin config.
+ * @param body - ntfy JSON payload (topic included).
+ * @param options - cache flag, caller signal, and timeout.
+ * @returns `{ ok, id, status }`.
+ */
+async function postJsonMessage(config, body, options = {}) {
+  const { base } = resolveTarget(config)
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 10000)
+  const url = `${base}/${options.cache === false ? '?cache=no' : ''}`
+  const headers = { 'Content-Type': 'application/json', ...authHeaders(config) }
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const signal = options.signal === undefined ? deadline : AbortSignal.any([options.signal, deadline])
+
+  let res
+  try {
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal })
+  } catch (err) {
+    throw new Error(`连不上 ntfy（${url}）：${err?.message ?? err}`)
+  }
+  if (!res.ok) throw new Error(`ntfy 返回 HTTP ${res.status}：${await errorText(res)}`)
+
+  let id = ''
+  try { id = String((await res.json())?.id ?? '') } catch { /* 发出去了就算成功 */ }
+  return { ok: true, id, status: res.status }
+}
+
+const APPROVAL_ROUTE = '/dsh-ntfy/approval'
+/** Path action → approval outcome. The id in the path is the capability. */
+const APPROVAL_ACTIONS = new Map([
+  ['allow', 'allowed-once'],
+  ['reject', 'rejected'],
+])
+
+/**
+ * Human-readable body for an approval push. The reason is the model's / hook's
+ * own text, so it is passed through verbatim (trimmed and capped).
+ * @param req - the pending approval request.
+ * @returns the notification body.
+ */
+function approvalMessage(req) {
+  const reason = String(req.reason ?? '').trim()
+  return [
+    `工具：${req.toolName}`,
+    `原因：${reason === '' ? '（没有说明）' : (reason.length > 1200 ? `${reason.slice(0, 1200)}…` : reason)}`,
+    '',
+    '在页面上等了一会儿没人处理，所以推到你手机。点下面的按钮直接决定；点通知本身可打开 DSH。',
+  ].join('\n')
+}
+
+/**
+ * Build the approval relay: a `approval/request` listener that lets the normal
+ * answerers (the Web UI) decide first, and only after `delayMs` falls back to a
+ * phone push with allow/reject action buttons.
+ *
+ * The listener is composed with `prepend: true`: the forwarded client
+ * waterfall would otherwise sit in front of it and hold this listener until
+ * the user answers, so the timer could never start.
+ * @param ctx - host context (logger + webServer).
+ * @param config - plugin config.
+ * @returns `onRequest` for the waterfall and `handleRoute` for the callback.
+ */
+function createApprovalRelay(ctx, config) {
+  const pending = new Map()
+  const active = new Set()
+  const configuredDelay = Number(config.approvalDelayMs)
+  const delayMs = Math.min(2 ** 31 - 1, Number.isFinite(configuredDelay) && configuredDelay >= 0 ? configuredDelay : 300000)
+  const baseUrl = String(config.approvalBaseUrl ?? '').trim().replace(/\/+$/, '')
+  let disposed = false
+
+  /**
+   * One approval request. Resolves with the first decision from the Web UI, the
+   * phone, cancellation, or the fail-closed outcome.
+   */
+  function onRequest(req, next) {
+    return new Promise((resolve) => {
+      let settled = false
+      let timer = null
+      let pushed = null
+      let downstreamDone = false
+      let downstreamOutcome = 'unavailable'
+
+      const settle = (outcome) => {
+        if (settled) return
+        settled = true
+        if (timer !== null) { clearTimeout(timer); timer = null }
+        if (pushed !== null) { pending.delete(pushed.id); pushed = null }
+        active.delete(settle)
+        req.signal?.removeEventListener('abort', onAbort)
+        resolve(outcome)
+      }
+      const onAbort = () => settle('cancelled')
+      active.add(settle)
+
+      if (disposed || req.signal?.aborted === true) { settle('cancelled'); return }
+      req.signal?.addEventListener('abort', onAbort, { once: true })
+
+      const handleDownstream = (outcome) => {
+        downstreamDone = true
+        downstreamOutcome = outcome
+        // 'unavailable' means no answerer claimed it (page closed, another
+        // process, …). Keep the request alive until the push has a chance:
+        // that is exactly the "user is away from the screen" case.
+        if (outcome === 'unavailable') return
+        settle(outcome)
+      }
+      Promise.resolve().then(() => next()).then(handleDownstream, () => handleDownstream('unavailable'))
+
+      timer = setTimeout(() => { timer = null; void pushNow() }, delayMs)
+      timer.unref?.()
+
+      async function pushNow() {
+        if (settled || disposed) return
+        const id = randomBytes(16).toString('base64url')
+        const allowUrl = `${baseUrl}${APPROVAL_ROUTE}/${id}/allow`
+        const rejectUrl = `${baseUrl}${APPROVAL_ROUTE}/${id}/reject`
+        const body = {
+          topic: String(config.topic ?? '').trim(),
+          title: `需要审批：${req.toolName}`,
+          message: approvalMessage(req),
+          priority: 4,
+          tags: ['warning'],
+          click: baseUrl,
+          actions: [
+            { action: 'http', label: '✅ 通过', url: allowUrl, method: 'POST', clear: true },
+            { action: 'http', label: '⛔ 拒绝', url: rejectUrl, method: 'POST', clear: true },
+          ],
+        }
+        try {
+          const sent = await postJsonMessage(config, body, { timeoutMs: config.timeoutMs })
+          ctx.logger?.info?.(`[dsh-ntfy] approval push sent (${req.toolName}, id ${sent.id || 'unknown'}); allow ${allowUrl}`)
+        } catch (error) {
+          ctx.logger?.warn?.(`[dsh-ntfy] approval push failed: ${error?.message ?? error}`)
+          // No UI either: fail closed instead of hanging the tool call forever.
+          if (downstreamDone && downstreamOutcome === 'unavailable') settle('unavailable')
+          return
+        }
+        if (settled || disposed) return
+        pushed = { id, toolName: req.toolName, createdAt: Date.now(), settle }
+        pending.set(id, pushed)
+      }
+    })
+  }
+
+  /** POST /dsh-ntfy/approval/<id>/{allow,reject} — the phone button target. */
+  function handleRoute(webReq, webRes) {
+    const send = (status, text, headers = {}) => {
+      webRes.writeHead(status, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow',
+        ...headers,
+      })
+      webRes.end(text)
+    }
+
+    // POST only: a GET could be triggered by a link preview / prefetch and
+    // approve an action the user never saw. ntfy's http action uses POST.
+    if (webReq.method !== 'POST') {
+      send(405, '请从手机通知上的「通过 / 拒绝」按钮操作。\n', { allow: 'POST' })
+      return
+    }
+    let url
+    try { url = new URL(webReq.url ?? '/', 'http://dsh.invalid') } catch { send(400, 'bad request\n'); return }
+    const prefix = `${APPROVAL_ROUTE}/`
+    if (!url.pathname.startsWith(prefix)) { send(404, 'not found\n'); return }
+    const parts = url.pathname.slice(prefix.length).split('/')
+    if (parts.length !== 2) { send(404, 'not found\n'); return }
+    const [id, action] = parts
+    const outcome = APPROVAL_ACTIONS.get(action)
+    if (outcome === undefined) { send(400, '未知操作\n'); return }
+
+    const record = pending.get(id)
+    if (record === undefined) {
+      send(410, '这个审批已经处理过了，或者已经失效。\n')
+      return
+    }
+    record.settle(outcome)
+    ctx.logger?.info?.(`[dsh-ntfy] approval ${outcome === 'allowed-once' ? 'allowed' : 'rejected'} from phone (${record.toolName})`)
+    send(200, outcome === 'allowed-once'
+      ? '✅ 已通过，agent 会继续执行。\n'
+      : '⛔ 已拒绝，agent 会停止这个操作。\n')
+  }
+
+  /** Fail in-flight requests closed and drop every pending button when the plugin unloads. */
+  function dispose() {
+    disposed = true
+    for (const settle of [...active]) settle('cancelled')
+    pending.clear()
+  }
+
+  return { onRequest, handleRoute, dispose }
 }
 
 const OUTPUT_SCHEMA = {
@@ -172,7 +381,7 @@ export function apply(ctx, config) {
       ],
     },
     async execute(args, exec) {
-      const { base, topic } = resolveTarget(config)
+      const { topic } = resolveTarget(config)
       const message = String(args?.message ?? '').trim()
       if (!message) throw new Error('message 不能为空')
 
@@ -191,23 +400,11 @@ export function apply(ctx, config) {
       }
       if (args?.markdown === true) body.markdown = true
 
-      // JSON 发布要 POST 到**根路径**，topic 放在 body 里；
-      // cache=no 只能走查询参数（JSON 字段表里没有它）。
-      const url = `${base}/${args?.cache === false ? '?cache=no' : ''}`
-      const headers = { 'Content-Type': 'application/json', ...authHeaders(config) }
-      const signal = AbortSignal.any([exec.signal, AbortSignal.timeout(timeoutMs)].filter(Boolean))
-
-      let res
-      try {
-        res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal })
-      } catch (err) {
-        throw new Error(`连不上 ntfy（${url}）：${err?.message ?? err}`)
-      }
-      if (!res.ok) throw new Error(`ntfy 返回 HTTP ${res.status}：${await errorText(res)}`)
-
-      let id = ''
-      try { id = String((await res.json())?.id ?? '') } catch { /* 发出去了就算成功 */ }
-      return { ok: true, id, status: res.status }
+      return postJsonMessage(config, body, {
+        cache: args?.cache !== false,
+        timeoutMs,
+        signal: exec.signal,
+      })
     },
   })
 
@@ -291,4 +488,31 @@ export function apply(ctx, config) {
       return { ok: true, id, status: res.status, bytes: bytes.length }
     },
   })
+
+  // 审批转发：页面上的审批超过 approvalDelayMs 没人处理，就推手机并挂
+  // 「通过 / 拒绝」按钮。回调走 dsh 自己的 HTTP 服务（前缀路由比 webui-auth
+  // 的 '' 前缀更长，所以不会被登录页截走）；URL 里的随机 id 就是凭证。
+  if (config?.approvalEnabled === true) {
+    const baseUrl = String(config?.approvalBaseUrl ?? '').trim()
+    if (baseUrl === '') {
+      ctx.logger?.warn?.('dsh-ntfy: approvalEnabled 为 true 但 approvalBaseUrl 为空，审批转发没有启用')
+      return
+    }
+    ctx.inject(['webServer'], (scope) => {
+      const relay = createApprovalRelay(scope, config)
+      scope.effect(() => {
+        const offRequest = scope.on('approval/request', relay.onRequest, { prepend: true })
+        const offRoute = scope.webServer.register({
+          kind: 'prefix',
+          path: APPROVAL_ROUTE,
+          handler: relay.handleRoute,
+        })
+        return () => {
+          offRequest()
+          offRoute()
+          relay.dispose()
+        }
+      }, 'dsh-ntfy: approval relay')
+    })
+  }
 }
