@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "E2E browser tests",
+    "description": "Runs a dedicated headless Chromium against the Web UI: scripted steps, login state, screenshots, console errors."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "端到端浏览器测试",
+    "description": "用专用无头 Chromium 跑 Web UI：步骤脚本、登录态、截图、控制台错误。"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "dsh-e2e",
+  "version": "0.1.0",
+  "description": "Dedicated headless-browser end-to-end testing tool for the DeepSeek Harness Web UI.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "e2e",
+    "playwright"
+  ],
+  "dependencies": {
+    "playwright-core": "1.61.1"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
