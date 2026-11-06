@@ -20,7 +20,9 @@ the cases where the message already left the composer.
 `conversation.chat.user.before` — the chain slot rendered inside the user row,
 before the bubble. It is the one user-owned decoration point in Chat, so the
 control belongs to the message it re-sends rather than to the assistant reply
-under it. Icon only, revealed on hovering the row; steering rows and local
+under it. The row is laid out as a two-column grid by this plugin so the icon
+sits on the bubble's line at its left (the copy/branch row still spans
+underneath). Icon only, revealed on hovering the row; steering rows and local
 echoes decline through the entry's selector.
 
 ## What it sends
@@ -31,8 +33,8 @@ echoes decline through the entry's selector.
 | Images | Re-read with `session.readAttachment` and inlined as base64 prompt parts — the same shape a subagent continuation sends. Their per-prompt receipts are gone, but the bytes stay addressable |
 | Files | Refused. `PromptContentPart` takes a per-prompt `receiptId` for a generic file and nothing reconstructs one here, so the icon renders disabled and explains why |
 | While running | Disabled; a Turn cannot be re-asked over an in-flight one |
-| Failure | The Host's business error reaches the composer's notice rail, the same place a failed draft send appears |
-| Success | An info notice in the composer; the new prompt appears as a normal user message |
+| Failure | The Session's own prompt-error surface, exactly as for a failed draft send |
+| Success | Nothing but the new user message; the plugin adds no toast of its own |
 
 The duplicate user message in the transcript is intentional: this is a re-ask,
 not a branch, and the transcript should show what the agent was actually sent.
