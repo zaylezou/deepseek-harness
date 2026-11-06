@@ -1,0 +1,29 @@
+{
+  "name": "dsh-question-landscape",
+  "version": "0.1.0",
+  "description": "Landscape layout for the ask_user_question composer: keep the input bar at the bottom and dock the pending question card to a right rail on touch/short screens.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

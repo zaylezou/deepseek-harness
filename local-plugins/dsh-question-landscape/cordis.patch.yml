@@ -1,0 +1,9 @@
+# dsh-question-landscape bundle patch
+#
+# Adds the layout-only browser plugin to the web tree. The client module system
+# finds the browser half through this row's bare package name; the host half is
+# a no-op. Removing this row (or the bundle entry in the profile) disables it.
+
+- insert:
+    - id: question-landscape
+      name: 'dsh-question-landscape'
