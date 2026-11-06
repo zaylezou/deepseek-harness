@@ -1,7 +1,8 @@
 # dsh-restart-anywhere (fork)
 
-Restart dsh **in place** — from the sidebar ↻ row or from the `dsh_restart`
-agent tool — and bring every in-progress session back with it.
+Restart dsh **in place** — from the sidebar ↻ row, from the `dsh_restart`
+agent tool, or **without cutting anyone off** from `dsh_safe_restart` / the
+"Restart when idle" row, which waits for every running turn to finish first.
 
 This is the fork-local copy of [`dsh-restart-anywhere` 0.1.7][upstream] carried
 by this checkout. The restart mechanism (execve / wrapper / systemd timer, the
@@ -19,6 +20,11 @@ around it is not.
 调用方自己也会被唤醒：`continue_prompt` 变成它唤醒后的指令，不传则用默认的
 「继续上次工作」。等待唤醒的会话按 250ms 错开发车，避免同时打模型。
 
+另有一个**安全重启**（`dsh_safe_restart` 工具 / 侧栏「Restart when idle」）：
+先等所有正在跑 turn 的会话把手头这轮跑完，再重启，谁都不会被打断，也就谁也
+不需要被唤醒；等超过 `max_wait_seconds`（默认 120s）还忙，就**放弃重启**并回一条
+消息给发起方，而不是掐断别人的活。
+
 ## What changes from upstream 0.1.7
 
 | | upstream 0.1.7 | this fork |
@@ -31,6 +37,7 @@ around it is not.
 | DSH 0.2.2 agent registry | broken (`agents.roots()`) | fixed (`agents.list()` + `parentSession` root gate) |
 | tool parameters | `continue_prompt` | `continue_prompt`, `reason` |
 | sidebar confirm | "sessions will be interrupted" | "interrupted, then resumed automatically" |
+| safe restart | — | `dsh_safe_restart` tool + "Restart when idle" row: waits for running turns, cancels instead of cutting work |
 
 What counts as **in progress**: a live top-level agent that still has a
 conversation to lose — at least one `user/message` or `assistant/message` in its
@@ -60,6 +67,27 @@ effects and to continue instead of starting over. The caller's
 (`dsh has restarted (you called dsh_restart). Continue: …`) so existing
 instructions keep working.
 
+## Safe restart
+
+`dsh_safe_restart` (and `POST /api/dsh-restart?when=idle&wait=<seconds>`) is the
+opposite trade-off from `dsh_restart`: instead of parking sessions and resuming
+them, it **waits** until no top-level session has a running turn, then restarts.
+Nothing is interrupted, so nothing is resumed — a session that was mid-turn
+finishes its turn and simply stays idle across the restart, with no notice in
+its transcript.
+
+- The caller cannot wait inside the tool call: its own turn is one of the turns
+  that must end. The tool therefore schedules the drain and returns; end your
+  turn and the restart follows within a poll interval (500 ms).
+- Waiting is bounded (default 120 s, `max_wait_seconds` up to 3600). If sessions
+  are still working at the deadline, the restart is **cancelled**: nothing is
+  cut off, and the calling session gets a follow-up saying so.
+- `continue_prompt` keeps the caller's own handoff (it is parked in the wake
+  file and woken after the restart); without it nobody is woken at all.
+- Queued-but-idle work cannot drain by waiting, so a session holding it is still
+  parked at commit time and resumed — the same rule as the hard restart.
+- An immediate `dsh_restart` supersedes a pending safe restart.
+
 ## Wake file
 
 `$DSH_HOME/restart-anywhere/wake.json`, written atomically (tmp + rename)
@@ -78,9 +106,9 @@ The profile links this checkout instead of installing the npm package:
 
 ```bash
 # ~/.dsh/profiles/web/package.json
-"dsh-restart-anywhere": "link:/home/opt/dsh/deepseek-harness/local-plugins/dsh-restart-anywhere"
+"dsh-restart-anywhere": "link:/opt/dsh/deepseek-harness/local-plugins/dsh-restart-anywhere"
 
-ln -s /home/opt/dsh/deepseek-harness/local-plugins/dsh-restart-anywhere \
+ln -s /opt/dsh/deepseek-harness/local-plugins/dsh-restart-anywhere \
   ~/.dsh/profiles/web/node_modules/dsh-restart-anywhere
 ```
 
@@ -91,10 +119,13 @@ specifier; upgrading the upstream package would replace this fork, so treat an
 upstream bump as a merge, not an install.
 
 No configuration keys. `/api/dsh-restart` answers `GET` with the detected mode
-and `POST` with `{ ok, mode, via, boot, resuming }`, where `resuming` is the
-number of sessions parked for the next boot.
+(plus `draining: { until, waiting, sessions }` while a safe restart waits) and
+`POST` with `{ ok, mode, via, boot, resuming }`, where `resuming` is the number
+of sessions parked for the next boot. `POST ?when=idle&wait=<seconds>` schedules
+a safe restart instead and answers `{ ok, draining: true, until, waiting }`.
 
 ## Tests
 
-`node --test test/*.test.js` from this directory. The tests use a fake Cordis context
-and a temporary `DSH_HOME`; they never touch the running dsh.
+`node --test test/*.test.js` from this directory (17 tests). They use a fake
+Cordis context and a temporary `DSH_HOME`, cover both tools end to end through a
+child-process fixture, and never touch the running dsh.

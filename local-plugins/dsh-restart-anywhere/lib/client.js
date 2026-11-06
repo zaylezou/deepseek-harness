@@ -1,7 +1,11 @@
-// dsh-restart-anywhere — browser half: a small ↻ "Restart dsh" row above Settings
-// in the left sidebar (icon only when the sidebar is collapsed to its rail).
-// Hidden only where restart isn't supported (desktop app). Click -> confirm ->
-// POST, then poll until a server with a new boot id answers, then reload.
+// dsh-restart-anywhere — browser half: two rows above Settings in the left
+// sidebar (icon only when the sidebar is collapsed to its rail):
+//   ↻ Restart dsh            — immediate: running sessions are interrupted and
+//                              resumed after the restart.
+//   ⏳ Restart when idle      — safe: waits for every running turn to finish,
+//                              then restarts. Nothing is cut off.
+// Click -> confirm -> POST, then poll until a server with a new boot id
+// answers, then reload. Hidden only where restart isn't supported (desktop app).
 window.__ModuleLoader__.load({ id: "dsh-restart-anywhere", factory: (require) => {
   var module = { exports: {} };
   const react = require("react");
@@ -27,22 +31,34 @@ window.__ModuleLoader__.load({ id: "dsh-restart-anywhere", factory: (require) =>
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const info = () => fetch(ROUTE, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null), () => null);
 
-  /** Wait until a server with a different boot id answers: robust however fast the restart is. */
-  async function waitForNewBoot(oldBoot) {
-    for (let i = 0; i < 120; i++) {
+  /**
+   * Wait until a server with a different boot id answers: robust however fast or
+   * slow the restart is. `onTick` sees every poll, so a cancelled safe restart
+   * (no longer draining, same boot) can be told apart from a slow one.
+   */
+  async function waitForNewBoot(oldBoot, onTick) {
+    for (let i = 0; i < 300; i++) {
       await sleep(1000);
       const b = await info();
       if (b && b.boot && b.boot !== oldBoot) return true;
+      if (onTick) onTick(b);
     }
     return false;
+  }
+
+  function Shell(props) {
+    const label = props.label;
+    return h("button", { type: "button", style: props.wide ? wideStyle : railStyle, title: label, "aria-label": label,
+      disabled: props.busy, onClick: props.onClick,
+      onMouseEnter: (e) => { e.currentTarget.style.background = "var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05))"; },
+      onMouseLeave: (e) => { e.currentTarget.style.background = "transparent"; } },
+      h(Icon, { spin: props.busy }), props.wide ? h("span", null, label) : null);
   }
 
   function RestartButton(props) {
     const [how, setHow] = react.useState(null);
     const [phase, setPhase] = react.useState("idle");
-    react.useEffect(() => {
-      info().then(setHow);
-    }, []);
+    react.useEffect(() => { info().then(setHow); }, []);
     if (!how || !how.mode) return null;
 
     const onClick = async () => {
@@ -54,19 +70,54 @@ window.__ModuleLoader__.load({ id: "dsh-restart-anywhere", factory: (require) =>
         const res = await fetch(ROUTE, { method: "POST" });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
         if (await waitForNewBoot(how.boot)) return window.location.reload();
-        throw new Error("dsh did not come back within 2 minutes");
+        throw new Error("dsh did not come back within 5 minutes");
       } catch (e) {
         setPhase("idle");
         window.alert("Restart failed: " + (e && e.message ? e.message : e));
       }
     };
 
-    const label = phase === "busy" ? "Restarting dsh…" : "Restart dsh";
-    return h("button", { type: "button", style: props.wide ? wideStyle : railStyle, title: label, "aria-label": label,
-      disabled: phase === "busy", onClick,
-      onMouseEnter: (e) => { e.currentTarget.style.background = "var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05))"; },
-      onMouseLeave: (e) => { e.currentTarget.style.background = "transparent"; } },
-      h(Icon, { spin: phase === "busy" }), props.wide ? h("span", null, label) : null);
+    return h(Shell, { wide: props.wide, busy: phase === "busy", onClick,
+      label: phase === "busy" ? "Restarting dsh…" : "Restart dsh" });
+  }
+
+  function SafeRestartButton(props) {
+    const [how, setHow] = react.useState(null);
+    const [phase, setPhase] = react.useState("idle"); // idle | waiting
+    const [waiting, setWaiting] = react.useState(0);
+    react.useEffect(() => { info().then(setHow); }, []);
+    if (!how || !how.mode) return null;
+
+    const onClick = async () => {
+      if (phase === "waiting") return;
+      if (!window.confirm("Restart dsh after every session has finished the turn it is running?\n"
+        + "Nothing is cut off. This waits up to 2 minutes; if a session is still working then, the restart is cancelled.")) return;
+      setPhase("waiting");
+      try {
+        const res = await fetch(ROUTE + "?when=idle&wait=120", { method: "POST" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || "HTTP " + res.status);
+        setWaiting(body.waiting || 0);
+        let cancelled = false;
+        const arrived = await waitForNewBoot(how.boot, (b) => {
+          if (b && b.draining) setWaiting(b.draining.waiting || 0);
+          else if (b && !b.draining && b.boot === how.boot) cancelled = true;
+        });
+        if (arrived) return window.location.reload();
+        setPhase("idle");
+        window.alert(cancelled
+          ? "The safe restart was cancelled: sessions were still working after the wait. Nothing was interrupted."
+          : "dsh did not come back within 5 minutes.");
+      } catch (e) {
+        setPhase("idle");
+        window.alert("Safe restart failed: " + (e && e.message ? e.message : e));
+      }
+    };
+
+    const label = phase === "waiting"
+      ? (waiting > 0 ? "Waiting for " + waiting + " session" + (waiting === 1 ? "" : "s") + "…" : "Restarting dsh…")
+      : "Restart when idle";
+    return h(Shell, { wide: props.wide, busy: phase === "waiting", onClick, label });
   }
 
   module.exports.inject = ["slots"];
@@ -74,6 +125,9 @@ window.__ModuleLoader__.load({ id: "dsh-restart-anywhere", factory: (require) =>
     ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () =>
       ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-restart-anywhere", order: 10 }, RestartButton)),
       "dsh-restart-anywhere: sidebar button");
+    ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () =>
+      ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-restart-anywhere-idle", order: 11 }, SafeRestartButton)),
+      "dsh-restart-anywhere: sidebar safe button");
   };
   return module.exports;
 } });

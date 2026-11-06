@@ -1,8 +1,8 @@
 {
   "name": "dsh-restart-anywhere",
-  "version": "0.2.1-local.1",
+  "version": "0.2.2-local.1",
   "private": true,
-  "description": "Restart dsh in place from the sidebar or an agent tool; every in-progress session is snapshotted before teardown and resumed after the restart. Fork of dsh-restart-anywhere 0.1.7.",
+  "description": "Restart dsh in place from the sidebar or an agent tool; every in-progress session is snapshotted before teardown and resumed after the restart, or a safe restart waits for running turns and cuts nobody off. Fork of dsh-restart-anywhere 0.1.7.",
   "icon": "./icon.svg",
   "author": "Johannes Tebbert <info@joblessjoe.com> (https://joblessjoe.com)",
   "license": "MIT",

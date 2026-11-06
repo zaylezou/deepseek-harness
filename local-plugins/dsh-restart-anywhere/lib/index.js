@@ -52,6 +52,8 @@ const WAKE_FILE = join(DSH_HOME, 'restart-anywhere', 'wake.json')
 const WAKE_VERSION = 2
 const WAKE_TTL = 30 * 60_000 // a wake older than this belongs to a restart that never happened
 const WAKE_STAGGER_MS = 250 // space out resumed sessions so they don't all call the model at once
+const DRAIN_POLL_MS = 500 // safe restart: how often to re-check for a still-running turn
+const DRAIN_WAIT_S = 120 // safe restart: default bound before giving up instead of cutting work
 const readCgroup = () => { try { return readFileSync('/proc/self/cgroup', 'utf8') } catch { return '' } }
 
 /** The systemd service this process runs in, from its cgroup (v2 or v1); null otherwise. */
@@ -194,6 +196,24 @@ export function isInProgress(agent) {
 }
 
 /**
+ * Sessions a safe restart must wait for: top-level sessions whose turn is still
+ * running. An idle session with queued work cannot drain by waiting, so it is
+ * not here — the commit's snapshot parks it and the next boot resumes it. Blank
+ * chats are not work either (see {@link hasConversation}).
+ * @param agents - live agents from `ctx.agents.list()`.
+ * @returns session ids still working.
+ */
+export function drainBusy(agents) {
+  const busy = []
+  for (const agent of agents ?? []) {
+    const id = agent?.session?.id
+    if (!id || isSubagent(agent)) continue
+    try { if (agent.status === 'running' && isInProgress(agent)) busy.push(id) } catch { /* a disposed agent is not working */ }
+  }
+  return busy
+}
+
+/**
  * Snapshot every live top-level session that is still in progress into wake
  * entries. The caller is always represented (with its continue_prompt) so the
  * session that asked for the restart is resumed like every other one.
@@ -239,7 +259,8 @@ export function collectWakes(agents, { callerSessionId = null, continuePrompt = 
  */
 export function composeWakeText(entry, wake = {}) {
   if (entry.kind === 'caller' && entry.prompt) {
-    return `dsh has restarted (you called dsh_restart). Continue:\n\n${entry.prompt}`
+    const called = entry.tool === 'safe' ? 'dsh_safe_restart' : 'dsh_restart'
+    return `dsh has restarted (you called ${called}). Continue:\n\n${entry.prompt}`
   }
   const reason = typeof wake.reason === 'string' && wake.reason.trim() ? ` Restart reason: ${wake.reason.trim()}.` : ''
   const dropped = entry.pending > 0
@@ -294,6 +315,9 @@ export function normalizeWake(raw, now = Date.now()) {
       pending: Number.isFinite(item.pending) ? item.pending : 0,
       status: typeof item.status === 'string' ? item.status : 'running',
       at,
+      // Present only for a safe restart, so the resumed session is told which
+      // tool restarted dsh; an absent key keeps v2 files from before it intact.
+      ...(item.tool === 'safe' ? { tool: 'safe' } : {}),
     })
   }
   return wake
@@ -337,6 +361,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 export function apply(ctx) {
   let restarting = false
+  /** A safe restart waiting for running turns, or null. */
+  let pending = null
 
   const agents = () => ctx.get('agents')
   const turns = session => {
@@ -344,6 +370,81 @@ export function apply(ctx) {
       const boundary = agents()?.turnBoundaryOf?.(session)
       return Number.isFinite(boundary?.lastTurn) ? boundary.lastTurn : 0
     } catch { return 0 }
+  }
+
+  const liveAgents = () => {
+    try { return agents()?.list?.() ?? [] } catch { return [] }
+  }
+
+  const clampWait = ms => Math.min(Math.max(Number.isFinite(ms) ? ms : DRAIN_WAIT_S * 1000, 5_000), 3_600_000)
+
+  const drainState = () => {
+    const busy = drainBusy(liveAgents())
+    return { until: pending?.deadline ?? 0, waiting: busy.length, sessions: busy }
+  }
+
+  /** Tell the caller its safe restart was cancelled: a follow-up, so it wakes. */
+  const notifyCancelled = async (sessionId, text, why) => {
+    console.warn(`dsh-restart-anywhere: ${why}`)
+    if (!sessionId) return
+    try {
+      const sessionController = ctx.get('sessionController')
+      const sessions = ctx.get('sessions')
+      const found = await sessionController?.resolveAgent?.(sessionId)
+      if (!found || 'error' in found) throw found?.error ?? new Error('session not found')
+      found.agent.followup({ id: randomUUID(), role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'dsh-restart-anywhere', form: 'notice', summary: 'safe restart cancelled' } })
+      if (sessions) await sessions.flush(found.agent.session)
+    } catch (err) {
+      console.warn(`dsh-restart-anywhere: could not tell session ${sessionId} the safe restart was cancelled:`, err)
+    }
+  }
+
+  /** One drain check: commit once nothing is running, give up at the deadline. */
+  const drainTick = () => {
+    if (pending === null) return
+    const busy = drainBusy(liveAgents())
+    if (busy.length === 0) {
+      const request = pending.request
+      pending = null
+      console.info('dsh-restart-anywhere: every session is idle; performing the safe restart')
+      void restart({ ...request, drained: true, tool: 'safe' })
+      return
+    }
+    const left = pending.deadline - Date.now()
+    if (left <= 0) {
+      const request = pending.request
+      pending = null
+      const seconds = Math.round(request.windowMs / 1000)
+      const names = busy.join(', ')
+      const text = `dsh did NOT restart: ${busy.length} session${busy.length === 1 ? ' was' : 's were'} still working after ${seconds}s (${names}). Nothing was interrupted.`
+        + ' Call dsh_safe_restart again to keep waiting, or dsh_restart to restart immediately.'
+      void notifyCancelled(request.callerSessionId, text,
+        `safe restart cancelled after ${seconds}s; still running: ${names}`)
+      return
+    }
+    setTimeout(drainTick, DRAIN_POLL_MS)
+  }
+
+  /** Schedule a drain; returns the same [status, body] shape the route and tools render. */
+  const schedule = (request, windowMs) => {
+    const how = detect()
+    if (!how.mode) return [409, { ok: false, error: `restart is not supported in the ${how.via}` }]
+    if (restarting) return [409, { ok: false, error: 'a restart is already in progress' }]
+    if (pending !== null) return [409, { ok: false, error: 'a safe restart is already waiting for sessions to finish' }]
+    const ending = Date.now() + windowMs
+    pending = { request: { ...request, windowMs }, deadline: ending, windowMs }
+    const busy = drainBusy(liveAgents())
+    if (request.callerSessionId) {
+      // The caller's own turn must end for the drain to finish; it is expected
+      // in the list, so this is a note in the log, not a problem.
+      console.info(`dsh-restart-anywhere: safe restart scheduled (up to ${Math.round(windowMs / 1000)}s); waiting for ${busy.length} session(s): ${busy.join(', ') || 'none'}`)
+    } else {
+      console.info(`dsh-restart-anywhere: safe restart scheduled from the sidebar (up to ${Math.round(windowMs / 1000)}s); waiting for ${busy.length} session(s)`)
+    }
+    setTimeout(drainTick, DRAIN_POLL_MS)
+    return [202, { ok: true, ...how, boot: BOOT, draining: true, until: ending, waiting: busy.length, sessions: busy }]
   }
 
   /** Snapshot in-progress sessions; a broken registry must not block the restart. */
@@ -393,30 +494,44 @@ export function apply(ctx) {
    * Start a restart; resolves to [httpStatus, body] once it's committed (or
    * refused). Every in-progress top-level session is parked in the wake file
    * before the tree goes down, the caller included.
-   * @param request - caller session, its continue prompt, and an optional reason.
+   * @param request - caller session, its continue prompt, an optional reason,
+   *   and for a drained (safe) restart `drained: true` plus `tool: 'safe'`.
    */
   const restart = async (request = {}) => {
     let how = detect()
     if (!how.mode) return [409, { ok: false, error: `restart is not supported in the ${how.via}` }]
     if (restarting) return [409, { ok: false, error: 'a restart is already in progress' }]
+    if (pending !== null) {
+      // An immediate restart supersedes a drain the caller no longer wants to wait for.
+      pending = null
+      console.info('dsh-restart-anywhere: immediate restart superseded the safe restart that was waiting')
+    }
     restarting = true
     try {
       const wakes = snapshot(request)
+      // A safe restart waited for every running turn to finish, so apart from
+      // the caller (which only wants its continue_prompt) there is nothing to
+      // resume. A session that slipped back into work during the commit window
+      // is still parked as interrupted by the snapshot above.
+      const parked = request.drained === true
+        ? wakes.filter(entry => entry.kind !== 'caller' || (request.continuePrompt ?? '') !== '')
+          .map(entry => (entry.kind === 'caller' ? { ...entry, tool: request.tool ?? 'dsh_restart' } : entry))
+        : wakes
       // Park the handoff before any commit path: a systemd unit restart does
       // not run this process's teardown, and a crash between here and the new
       // process must still leave every interrupted session on disk.
-      writeWakeFile(wakes, { reason: request.reason ?? '', caller: request.callerSessionId ?? null })
+      writeWakeFile(parked, { reason: request.reason ?? '', caller: request.callerSessionId ?? null })
       if (how.mode === 'systemd') {
         const scope = how.user ? ['--user'] : []
         const args = [...scope, '--on-active=1', '--timer-property=AccuracySec=100ms', 'systemctl', ...scope, 'restart', how.unit]
         const failed = await new Promise(resolve => execFile('systemd-run', args, { timeout: 10_000 },
           (err, _out, stderr) => resolve(err ? (stderr || err.message).trim() : null)))
-        if (!failed) return [202, { ok: true, ...how, boot: BOOT, resuming: wakes.length }]
+        if (!failed) return [202, { ok: true, ...how, boot: BOOT, resuming: parked.length }]
         console.warn(`dsh-restart-anywhere: systemd-run failed (${failed}); restarting in place`)
         how = { ...detect({ env: {} }), fallback: failed }
       }
       inPlace(how)
-      return [202, { ok: true, ...how, boot: BOOT, resuming: wakes.length }]
+      return [202, { ok: true, ...how, boot: BOOT, resuming: parked.length }]
     } catch (err) {
       // We are not restarting after all: do not wake anyone on the next boot.
       rmSync(WAKE_FILE, { force: true })
@@ -430,7 +545,15 @@ export function apply(ctx) {
     methods: ['GET', 'POST'],
     requestBody: 'buffered',
     fetch: async (request) => {
-      if (request.method === 'GET') return json(200, { ...detect(), boot: BOOT })
+      if (request.method === 'GET') {
+        return json(200, { ...detect(), boot: BOOT, ...(pending === null ? {} : { draining: drainState() }) })
+      }
+      const url = new URL(request.url, 'http://localhost')
+      if (url.searchParams.get('when') === 'idle') {
+        // The browser's safe row: drain first, then restart, without a caller.
+        const wait = clampWait(Number(url.searchParams.get('wait') ?? DRAIN_WAIT_S) * 1000)
+        return json(...schedule({ reason: url.searchParams.get('reason') ?? '' }, wait))
+      }
       return json(...await restart())
     },
   }), 'dsh-restart-anywhere: /api/dsh-restart')
@@ -441,7 +564,8 @@ export function apply(ctx) {
       + 'Call it last: this session stops while dsh restarts (a few seconds). Every session that is still in progress, this one '
       + 'included, is interrupted and then resumed automatically after the restart with a notice saying it was cut off and to '
       + 'continue where it stopped. Pass continue_prompt to give this session its own instruction for the resumed turn; pass '
-      + 'reason to tell every resumed session why the restart happened.',
+      + 'reason to tell every resumed session why the restart happened. This is the immediate (hard) restart: for one that waits '
+      + 'for running turns to finish, call dsh_safe_restart instead.',
     parameters: { type: 'object', properties: {
       continue_prompt: { type: 'string',
         description: 'What this session should do once dsh is back, e.g. "Plugin X is installed now; test its tool and finish issue #12." Omit for the default "continue where you stopped" notice.' },
@@ -462,11 +586,56 @@ export function apply(ctx) {
         : `dsh is restarting now. ${sessions} (this one included) will be resumed once dsh is back with a "continue where you stopped" notice. End your turn.`
     },
   }
+
+  /**
+   * The safe tool: let every running turn finish, then restart. The caller
+   * cannot wait inside this call — its own turn is the one that must end for the
+   * drain to finish — so the wait is scheduled and the tool returns immediately.
+   */
+  const safeTool = {
+    name: 'dsh_safe_restart',
+    description: 'Restart dsh without cutting anyone off: wait until every session has finished the turn it is running, '
+      + 'then restart. Nothing is interrupted and nothing needs resuming, so other sessions get no notice at all. '
+      + 'Call it last and end your turn: this session is part of what must go idle, and the restart happens right after it does. '
+      + 'If a session is still working at max_wait_seconds, the restart is cancelled (nothing is cut off) and this session is '
+      + 'told so in a follow-up message. Use dsh_restart when you need the restart immediately instead.',
+    parameters: { type: 'object', properties: {
+      continue_prompt: { type: 'string',
+        description: 'What this session should do once dsh is back. Omit to stay silent: a safe restart wakes nobody, including this session, because nothing was cut off.' },
+      reason: { type: 'string',
+        description: 'Optional short reason, recorded in the log and in any wake this restart still has to park.' },
+      max_wait_seconds: { type: 'number',
+        description: `How long to wait for running turns before giving up instead of cutting them (default ${DRAIN_WAIT_S}, at most 3600).` },
+    } },
+    output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+    async execute(args, exec) {
+      const prompt = typeof args?.continue_prompt === 'string' ? args.continue_prompt.trim() : ''
+      const reason = typeof args?.reason === 'string' ? args.reason.trim() : ''
+      const requested = Number(args?.max_wait_seconds)
+      const wait = clampWait(Number.isFinite(requested) && requested > 0 ? requested * 1000 : DRAIN_WAIT_S * 1000)
+      const callerSessionId = exec.agent.session.id
+      const [status, body] = schedule({ callerSessionId, continuePrompt: prompt, reason }, wait)
+      if (status !== 202) throw new Error(`safe restart refused: ${body.error}`)
+      const seconds = Math.round(wait / 1000)
+      return `dsh will restart as soon as every session has finished the turn it is running (waiting up to ${seconds}s; `
+        + `${body.waiting} still working right now). End your turn now — this session is one of them. `
+        + (prompt
+          ? 'You will be woken with your continue_prompt after the restart.'
+          : 'Nothing will be resumed and nobody is woken, because nothing is cut off.')
+    },
+  }
+
   // Tools are per agent; root sessions only, so a subagent can't restart dsh under its parent.
   ctx.inject(['agents'], (ctx) => {
     const isRoot = agent => agent?.session?.header?.parentSession === undefined
     const attach = (agent) => {
-      if (isRoot(agent)) ctx.effect(() => agent.ctx.effect(() => agent.ctx.tools.register(tool)))
+      if (isRoot(agent)) {
+        ctx.effect(() => agent.ctx.effect(() => {
+          const off = agent.ctx.tools.register(tool)
+          const offSafe = agent.ctx.tools.register(safeTool)
+          return () => { off(); offSafe() }
+        }))
+      }
     }
     ctx.on('agent/created', ({ agent }) => attach(agent))
     for (const agent of ctx.agents.list()) attach(agent)

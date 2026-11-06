@@ -16,7 +16,7 @@ const WAKE = join(HOME, 'restart-anywhere', 'wake.json')
 
 const plugin = await import('../lib/index.js')
 const {
-  apply, collectWakes, composeWakeText, hasConversation, isInProgress, normalizeWake, pendingCount,
+  apply, collectWakes, composeWakeText, drainBusy, hasConversation, isInProgress, normalizeWake, pendingCount,
   readWakeFile, writeWakeFile,
 } = plugin
 
@@ -159,23 +159,81 @@ test('the tool parks every in-progress session before committing the restart', (
   assert.deepEqual(wake.entries.map(entry => entry.kind), ['caller', 'interrupted'])
   assert.equal(wake.entries[0].prompt, 'finish the migration')
   assert.equal(wake.entries[0].turn, 2)
-  assert.equal(wake.entries[1].pending, 1)
+  assert.equal(wake.entries[1].pending, 0)
+})
+
+test('the safe tool waits for running turns, then parks only the caller', () => {
+  rmSync(WAKE, { force: true })
+  const out = execFileSync(process.execPath, [join(import.meta.dirname, 'fixtures/tool-restart.js'), 'safe'], {
+    encoding: 'utf8', env: { ...process.env, TEST_DSH_HOME: HOME },
+  })
+  const summary = JSON.parse(out.trim().split('\n').at(-1))
+  assert.equal(summary.name, 'dsh_safe_restart')
+  assert.match(summary.text, /will restart as soon as every session has finished the turn/)
+  assert.match(out, /safe restart scheduled/)
+  const wake = JSON.parse(readFileSync(WAKE, 'utf8'))
+  // Everything finished its turn before the restart, so only the caller (which
+  // asked for its continue_prompt) is parked: nobody else is told anything.
+  assert.deepEqual(wake.entries.map(entry => entry.sessionId), ['caller'])
+  assert.equal(wake.entries[0].kind, 'caller')
+  assert.equal(wake.entries[0].tool, 'safe')
+  assert.equal(wake.entries[0].prompt, 'finish the migration')
+})
+
+test('drainBusy waits for running turns only', () => {
+  const busy = drainBusy([
+    agent('running'),
+    agent('blank', { messages: [] }),
+    agent('idle-queue', { status: 'idle', nextTurn: 1 }),
+    agent('child', { parentSession: 'root', origin: 'subagent' }),
+  ])
+  assert.deepEqual(busy, ['running'])
+  assert.deepEqual(drainBusy([]), [])
+})
+
+test('a safe restart that never drains cancels itself and tells the caller', async () => {
+  rmSync(WAKE, { force: true })
+  const followups = []
+  const tools = []
+  const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} }
+  const stuck = Object.assign(agent('stuck', { status: 'running' }), {
+    ctx: { effect, tools: { register: (tool) => { tools.push(tool); return () => {} } } },
+  })
+  const boot = {
+    sessionController: { resolveAgent: async () => ({ agent: {
+      followup: message => followups.push(message), session: { id: 'caller' } } }) },
+    sessions: { flush: async () => true },
+  }
+  apply(fakeApplyContext(boot, { list: () => [stuck] }).ctx)
+  const safe = tools.find(candidate => candidate.name === 'dsh_safe_restart')
+  assert.notEqual(safe, undefined)
+  assert.ok(tools.some(candidate => candidate.name === 'dsh_restart'))
+  const text = await safe.execute({ max_wait_seconds: 5 }, { agent: { session: { id: 'caller' } } })
+  assert.match(text, /will restart as soon as every session has finished/)
+  await waitFor(() => followups.length === 1, 8000)
+  assert.match(followups[0].content[0].text, /dsh did NOT restart: 1 session was still working after 5s \(stuck\)/)
+  assert.equal(followups[0].source.kind, 'dsh-restart-anywhere')
 })
 
 // ---- apply(): boot half -------------------------------------------------------
 
-const fakeApplyContext = (boot) => {
+const fakeApplyContext = (boot, agentRegistry) => {
   const handlers = {}
+  const tools = []
+  const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} }
   const ctx = {
-    get: () => undefined,
-    effect: (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} },
+    get: (name) => (name === 'agents' ? agentRegistry : boot[name]),
+    effect,
     inject: (deps, callback) => {
       if (deps.includes('sessionController')) callback(boot)
+      if (deps.includes('agents') && agentRegistry !== undefined) {
+        callback({ agents: agentRegistry, on: () => {}, effect })
+      }
     },
     on: () => {},
     connection: { fetch: { register: (handler) => { handlers.restart = handler; return () => {} } } },
   }
-  return { ctx, handlers }
+  return { ctx, handlers, tools }
 }
 
 const waitFor = async (check, timeoutMs = 3000) => {
