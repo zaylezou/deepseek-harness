@@ -23,6 +23,14 @@
  *     panel, reserves the combination against editable commands, and has no
  *     edit affordance.
  *
+ *  3. Two extra actions on the tool-approval card ("switch to full access and
+ *     allow", "switch to auto review"). The card is a factory slot the core
+ *     panel renders; a factory has exactly one definition, so this shadows the
+ *     `conversation.composer` CHAIN above the stock panel (priority 0.5 vs 1),
+ *     renders the stock card through `renderFactorySlot` (keeping its keyboard,
+ *     detail, and busy state) and portals the two buttons into the card's own
+ *     action row.
+ *
  * Scope: Tab only fires while the caret is inside the composer card
  * (`[data-composer-card]`) and no dialog is open. Everywhere else — page,
  * sidebar, terminal, forms — Tab keeps its native focus movement, and
@@ -33,9 +41,10 @@ window.__ModuleLoader__.load({
   id: 'dsh-permission-toggle',
   factory: (require) => {
     const React = require('react')
+    const { createPortal } = require('react-dom')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const {
-      Menu, IconChevronDownOutlineRegular,
+      Button, Menu, IconChevronDownOutlineRegular,
       PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular,
       PermissionIconFullAccessRegular, PermissionIconAutoReviewRegular,
     } = primitives
@@ -45,6 +54,10 @@ window.__ModuleLoader__.load({
     const NS = 'permission-toggle'
     /** Preset keys used when the process catalog has not arrived yet. */
     const DEFAULT_CYCLE = ['read-only', 'workspace-write', 'danger-full-access']
+    /** Full-access preset key (the same literal the stock chip writes). */
+    const FULL_PRESET = 'danger-full-access'
+    /** Experimental auto-review preset key. */
+    const AUTO_PRESET = 'auto'
     /** Catalog fallback so the chip never blanks out while a catalog read is failing. */
     const FALLBACK_OPTIONS = DEFAULT_CYCLE.map(value => ({ value, name: value }))
     /** The composer capsule: the one region that owns Tab. */
@@ -90,6 +103,9 @@ window.__ModuleLoader__.load({
         'no-permission': '这个会话没有权限切换入口',
         'no-command': '宿主没有提供 /permission 命令',
         'failed': '切换失败：{message}',
+        'approval.escalation': '工具 {toolName} 请求越权执行',
+        'approval.full': '切换为完全权限并同意',
+        'approval.auto': '切换为自动审批',
       },
       en: {
         'label': 'Toggle permission mode',
@@ -105,6 +121,9 @@ window.__ModuleLoader__.load({
         'no-permission': 'This session has no permission control',
         'no-command': 'The host offers no /permission command',
         'failed': 'Switch failed: {message}',
+        'approval.escalation': 'The tool {toolName} asks to run with wider access',
+        'approval.full': 'Switch to full access and allow',
+        'approval.auto': 'Switch to auto review',
       },
     }
 
@@ -123,6 +142,7 @@ window.__ModuleLoader__.load({
 .dsh-pt-option-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-pt-badge{flex:none;color:var(--dsw-alias-label-tertiary);font-size:8px;line-height:10px;font-weight:500;letter-spacing:.2px}
 @container (max-width:460px){.dsh-pt-trigger:has(.dsh-pt-icon) .dsh-pt-label{display:none}}
+.dsh-pt-extra{display:flex;justify-content:flex-end;gap:8px;padding:0 16px 14px}
 `
 
     /** Toast node and its timers, shared by every feedback path. */
@@ -301,13 +321,8 @@ window.__ModuleLoader__.load({
             console.warn('[dsh-permission-toggle] catalog read failed:', error)
           }
         },
-        /**
-         * Preset keys the cycle walks: the configured table, in catalog order.
-         * `options` also carries live contributions such as the experimental
-         * Auto-review preset; `defaultOptions` is the configured set a user can
-         * actually pin, which is the three product modes on a stock deployment.
-         */
-        values: () => ((value?.defaultOptions ?? value?.options) ?? []).map(option => option.value),
+        /** Preset keys the cycle walks, in catalog order (live contributions included). */
+        values: () => (value?.options ?? []).map(option => option.value),
       }
     }
 
@@ -409,12 +424,91 @@ window.__ModuleLoader__.load({
           })
         }
 
+
+        /**
+         * The stock approval card with two policy shortcuts beside its own
+         * decisions. The card stays the core's: this chain entry renders it
+         * through `renderFactorySlot` (keeping the correlated tool detail, the
+         * Enter/Escape handling, and the answered state) and portals the two
+         * extra buttons into the card's own action row.
+         * @param props - chain props: owner interaction, matched approval, factories.
+         * @returns the composer takeover for a pending approval.
+         */
+        const ApprovalActions = (props) => {
+          const approval = props.matched
+          const wrap = React.useRef(null)
+          const [row, setRow] = React.useState(undefined)
+          const [pending, setPending] = React.useState(null)
+          const alive = React.useRef(true)
+          React.useEffect(() => () => { alive.current = false }, [])
+          // The card belongs to the core factory; its decision row is the one
+          // element carrying the module's readable `actionRow` class suffix.
+          React.useLayoutEffect(() => {
+            const next = wrap.current === null ? null : wrap.current.querySelector('[class*="actionRow"]')
+            setRow(current => (current === next ? current : next))
+          })
+          const act = (preset) => {
+            if (pending !== null || !approval.answerable) return
+            setPending(preset)
+            void (async () => {
+              const session = ctx.sessions.binding(props.sessionId)?.session
+              if (session === undefined) throw new Error(t('no-session'))
+              // Policy first: the request is only allowed once the wider mode
+              // is actually in force, so a failed switch leaves the card open.
+              await switchTo(ctx, session, preset)
+              await approval.answer('allowed-once')
+            })().catch((error) => {
+              const message = error instanceof Error ? error.message : String(error)
+              notify(t('failed', { message }), true)
+              console.warn('[dsh-permission-toggle] approval shortcut failed:', error)
+            }).finally(() => {
+              if (alive.current) setPending(null)
+            })
+          }
+          const disabled = pending !== null || !approval.answerable
+          const buttons = [
+            h(Button, {
+              key: 'full', variant: 'outline', disabled, onClick: () => { act(FULL_PRESET) },
+            }, t('approval.full')),
+            h(Button, {
+              key: 'auto', variant: 'outline', disabled, onClick: () => { act(AUTO_PRESET) },
+            }, t('approval.auto')),
+          ]
+          const reason = approval.displayReason === undefined
+            ? approval.reason
+            : ctx.locale.resolveText(approval.displayReason)
+          return h('div', { ref: wrap },
+            props.renderFactorySlot('conversation.approval.card', {
+              requestKey: approval.key,
+              title: reason ?? t('approval.escalation', { toolName: approval.toolName }),
+              ...(approval.callId === undefined ? {} : { callId: approval.callId }),
+              canAnswer: () => approval.answerable,
+              onAllow: () => approval.answer('allowed-once'),
+              onReject: () => approval.answer('rejected'),
+            }),
+            row === undefined ? null
+              : row === null ? h('div', { className: 'dsh-pt-extra' }, buttons)
+                : createPortal(buttons, row, 'permission-toggle-actions'),
+          )
+        }
+
         // Same cell as the stock control, one rank lower: the lowest priority renders.
         ctx.slots.inject('conversation.input.permission', () => ctx.slots.register({
           name: 'conversation.input.permission',
           priority: -1,
           locale: NS,
         }, PermissionChip))
+
+        // Above the stock approval panel (chain priority 1). The selector only
+        // matches a pending approval, so question cards and subagent takeovers
+        // keep their own entries.
+        ctx.slots.inject('conversation.composer', () => ctx.slots.register({
+          name: 'conversation.composer',
+          id: 'permission-toggle.approval',
+          priority: 0.5,
+          select: ({ pendingInteraction }) => pendingInteraction?.kind === 'approval' ? pendingInteraction : null,
+          locale: NS,
+        }, ApprovalActions))
 
         // The reference panel's read-only row. It also reserves Tab against
         // every editable command, so nothing else can claim the key.
