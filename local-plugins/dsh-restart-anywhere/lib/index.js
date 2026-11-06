@@ -142,15 +142,55 @@ const json = (status, body) => Response.json(body, { status, headers: { 'cache-c
 /** A subagent child is resumed by its parent, never on its own. */
 export const isSubagent = agent => agent?.session?.header?.origin === 'subagent'
 
+/**
+ * Sources that carry a harness notice rather than a human turn. `user-approval`
+ * is what the session controller injects when the permission preset changes;
+ * our own wake notice must not chain another one on the next restart. Kinds are
+ * merge-extensible, so anything this fork has never seen counts as real work —
+ * dropping an unknown producer's session is worse than one spurious resume.
+ */
+const NOTICE_SOURCES = new Set(['user-approval', 'dsh-restart-anywhere'])
+
+/** Whether a message is work a resume must continue, rather than a notice. */
+export const isHumanWork = message => message !== null && typeof message === 'object'
+  && !NOTICE_SOURCES.has(message?.source?.kind)
+
+/** Pending inbox messages, or [] when the agent exposes no readable inbox. */
+export function pendingMessages(agent) {
+  try { return [...(agent?.inbox?.nextTurn ?? []), ...(agent?.inbox?.nextStep ?? [])] } catch { return [] }
+}
+
 /** Pending inbox items, or 0 when the agent exposes no readable inbox. */
 export function pendingCount(agent) {
-  try { return (agent?.inbox?.nextTurn?.length ?? 0) + (agent?.inbox?.nextStep?.length ?? 0) } catch { return 0 }
+  return pendingMessages(agent).length
+}
+
+/**
+ * Whether the session has a conversation at all. A chat that was opened but
+ * never used has no `user/message` or `assistant/message` in its surface, even
+ * though the session controller keeps an Agent alive and may queue permission
+ * notices in its inbox; resuming that would make the model invent work. An
+ * unreadable transcript counts as a conversation: losing it is worse than a
+ * spurious resume.
+ */
+export function hasConversation(agent) {
+  try {
+    const messages = agent?.session?.deriveMessages?.()
+    if (!Array.isArray(messages)) return true
+    return messages.some(message => (message?.role === 'user' || message?.role === 'assistant')
+      && isHumanWork(message))
+  } catch {
+    return true
+  }
 }
 
 /** Whether a live session would lose work if the process stopped right now. */
 export function isInProgress(agent) {
-  try { if (agent?.status === 'running') return true } catch { /* a disposed agent is not in progress */ }
-  return pendingCount(agent) > 0
+  // Queued work is real work even before the first turn admits it into the
+  // surface; a blank chat's queue holds only notices, which do not count.
+  if (pendingMessages(agent).some(isHumanWork)) return true
+  try { if (agent?.status !== 'running') return false } catch { return false /* a disposed agent is not in progress */ }
+  return hasConversation(agent)
 }
 
 /**
@@ -310,8 +350,20 @@ export function apply(ctx) {
   const snapshot = (request) => {
     try {
       const live = agents()?.list?.() ?? []
-      return collectWakes(live, { callerSessionId: request.callerSessionId,
+      const wakes = collectWakes(live, { callerSessionId: request.callerSessionId,
         continuePrompt: request.continuePrompt ?? '', turnOf: turns })
+      // Say why an open tab is not resumed: "a restart left my empty chat
+      // alone" is the expected outcome, and the log is where that is visible.
+      const parked = new Set(wakes.map(entry => entry.sessionId))
+      const skipped = live.filter(agent => {
+        const id = agent?.session?.id
+        if (!id || parked.has(id) || isSubagent(agent)) return false
+        try { return agent.status === 'running' || pendingCount(agent) > 0 } catch { return false }
+      })
+      if (skipped.length > 0) {
+        console.info(`dsh-restart-anywhere: left ${skipped.length} unused session(s) alone: ${skipped.map(agent => agent.session.id).join(', ')}`)
+      }
+      return wakes
     } catch (err) {
       console.warn('dsh-restart-anywhere: could not snapshot running sessions:', err)
       return request.callerSessionId

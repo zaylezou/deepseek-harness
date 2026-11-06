@@ -16,16 +16,20 @@ const WAKE = join(HOME, 'restart-anywhere', 'wake.json')
 
 const plugin = await import('../lib/index.js')
 const {
-  apply, collectWakes, composeWakeText, isInProgress, normalizeWake, pendingCount,
+  apply, collectWakes, composeWakeText, hasConversation, isInProgress, normalizeWake, pendingCount,
   readWakeFile, writeWakeFile,
 } = plugin
 
-const agent = (id, { status = 'running', parentSession, origin, nextTurn = 0, nextStep = 0, header = {} } = {}) => ({
+const said = (role = 'user', kind = 'user') => ({ role, source: { kind }, content: [{ type: 'text', text: 'hi' }] })
+
+const agent = (id, { status = 'running', parentSession, origin, nextTurn = 0, nextStep = 0, header = {},
+  messages = [said()], pending = [] } = {}) => ({
   id,
   status,
-  inbox: { nextTurn: Array.from({ length: nextTurn }, (_, i) => ({ id: `${id}-t${i}` })),
+  inbox: { nextTurn: [...Array.from({ length: nextTurn }, (_, i) => ({ id: `${id}-t${i}` })), ...pending],
     nextStep: Array.from({ length: nextStep }, (_, i) => ({ id: `${id}-s${i}` })) },
-  session: { id, header: { id, ...header, ...(parentSession === undefined ? {} : { parentSession }), ...(origin === undefined ? {} : { origin }) } },
+  session: { id, header: { id, ...header, ...(parentSession === undefined ? {} : { parentSession }), ...(origin === undefined ? {} : { origin }) },
+    deriveMessages: () => messages },
 })
 
 const turnOf = values => (session) => values[session.id] ?? 0
@@ -40,9 +44,27 @@ test('in-progress means a running turn or queued inbox work', () => {
   assert.equal(pendingCount(agent('e', { nextTurn: 1, nextStep: 2 })), 3)
 })
 
+test('a chat opened but never used is not in progress, whatever the driver says', () => {
+  // The session controller keeps an Agent alive for a blank chat and queues
+  // permission notices in its inbox; resuming that makes the model invent work.
+  assert.equal(hasConversation(agent('blank', { messages: [] })), false)
+  assert.equal(isInProgress(agent('blank', { messages: [] })), false)
+  assert.equal(isInProgress(agent('blank-idle', { status: 'idle', messages: [] })), false)
+  assert.equal(isInProgress(agent('notice-only', { messages: [said('user', 'user-approval')] })), false)
+  assert.equal(isInProgress(agent('wake-only', { messages: [said('user', 'dsh-restart-anywhere')] })), false)
+  assert.equal(isInProgress(agent('queued-notice', { status: 'idle',
+    messages: [], pending: [said('user', 'user-approval')] })), false)
+  // Anything else in the queue is a human turn that must not be dropped.
+  assert.equal(isInProgress(agent('queued', { status: 'idle', messages: [], pending: [said()] })), true)
+  assert.equal(isInProgress(agent('answered', { messages: [said('assistant', 'model')] })), true)
+  // An unreadable transcript is treated as work: losing it is the worse failure.
+  assert.equal(hasConversation({ session: { deriveMessages: () => { throw new Error('closed') } } }), true)
+})
+
 test('collectWakes snapshots every in-progress top-level session, caller first', () => {
   const live = [
     agent('idle', { status: 'idle' }),
+    agent('blank', { messages: [] }),
     agent('child', { parentSession: 'root', origin: 'subagent', nextTurn: 2 }),
     agent('root', { nextTurn: 1 }),
     agent('caller', { nextStep: 1 }),
@@ -121,9 +143,12 @@ test('wake file write/read round trip, and only one boot can claim it', () => {
 
 test('the tool parks every in-progress session before committing the restart', () => {
   rmSync(WAKE, { force: true })
-  const summary = JSON.parse(execFileSync(process.execPath, [join(import.meta.dirname, 'fixtures/tool-restart.js')], {
+  const out = execFileSync(process.execPath, [join(import.meta.dirname, 'fixtures/tool-restart.js')], {
     encoding: 'utf8', env: { ...process.env, TEST_DSH_HOME: HOME },
-  }))
+  })
+  // The blank session is reported as left alone, not parked.
+  assert.match(out, /left 1 unused session\(s\) alone: blank/)
+  const summary = JSON.parse(out.trim().split('\n').at(-1))
   assert.equal(summary.name, 'dsh_restart')
   assert.match(summary.text, /dsh is restarting now\. 2 in-progress sessions \(this one included\)/)
   const wake = JSON.parse(readFileSync(WAKE, 'utf8'))

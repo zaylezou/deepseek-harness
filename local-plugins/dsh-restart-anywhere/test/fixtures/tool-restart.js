@@ -8,13 +8,15 @@ const { apply } = await import('../../lib/index.js')
 
 let tool
 const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} }
-const makeAgent = (id, { status = 'running', parentSession, origin, nextTurn = 0 } = {}) => {
+const said = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }
+const makeAgent = (id, { status = 'running', parentSession, origin, nextTurn = 0, messages = [said] } = {}) => {
   const live = {
     id,
     status,
     inbox: { nextTurn: Array.from({ length: nextTurn }, () => ({ id })), nextStep: [] },
     session: { id, header: { id, ...(parentSession === undefined ? {} : { parentSession }),
-      ...(origin === undefined ? {} : { origin }) } },
+      ...(origin === undefined ? {} : { origin }) },
+      deriveMessages: () => messages },
     ctx: { effect, tools: { register: (registered) => { tool = registered; return () => {} } } },
   }
   return live
@@ -25,6 +27,8 @@ const agents = [
   caller,
   makeAgent('other', { status: 'running', nextTurn: 1 }),
   makeAgent('idle', { status: 'idle' }),
+  // An open tab nobody typed into: running driver, no conversation at all.
+  makeAgent('blank', { status: 'running', messages: [] }),
   makeAgent('child', { status: 'running', origin: 'subagent', parentSession: 'caller' }),
 ]
 const registry = {

@@ -24,7 +24,7 @@ around it is not.
 | | upstream 0.1.7 | this fork |
 |---|---|---|
 | wake payload | one `{ sessionId, prompt, at }` | `{ version: 2, reason, caller, entries[] }` |
-| sessions resumed | only the caller, only with `continue_prompt` | every in-progress top-level session, caller included |
+| sessions resumed | only the caller, only with `continue_prompt` | every in-progress top-level session, caller included; a blank chat nobody typed into is left alone |
 | caller without prompt | nothing wakes it | default "continue where you stopped" notice |
 | other running sessions | killed silently | resumed with an interruption notice |
 | boot delivery | one follow-up, no flush check | one follow-up per entry, `sessions.flush` checked, failures isolated |
@@ -32,12 +32,24 @@ around it is not.
 | tool parameters | `continue_prompt` | `continue_prompt`, `reason` |
 | sidebar confirm | "sessions will be interrupted" | "interrupted, then resumed automatically" |
 
-What counts as **in progress**: a live top-level agent whose status is `running`
-or whose inbox still has queued `next-turn` / `next-step` messages. Subagent
-sessions (`header.origin === 'subagent'`) are skipped: their parent is the one
-that must decide how to continue, and a child cannot be resumed through
+What counts as **in progress**: a live top-level agent that still has a
+conversation to lose — at least one `user/message` or `assistant/message` in its
+surface — and whose status is `running`, or that has something other than a
+harness notice queued in `next-turn` / `next-step`. Subagent sessions
+(`header.origin === 'subagent'`) are skipped: their parent is the one that must
+decide how to continue, and a child cannot be resumed through
 `sessionController.resolveAgent` anyway. Limitation: a subagent that is still
 running while its parent is idle at restart time is not resumed independently.
+
+A **blank chat is not in progress**. Opening a new conversation keeps an Agent
+alive for it and the session controller queues permission notices
+(`source.kind === 'user-approval'`) in its inbox, so status and queue alone used
+to wake a session nobody had typed into — and the model then invented work to
+"continue". Such a session is now left alone, and the restart logs
+`left N unused session(s) alone: <ids>` so the omission is visible. Two
+deliberate choices: a transcript that cannot be read counts as work (losing it
+is the worse failure), and a message source this fork does not know counts as
+human work, so a producer such as the QQ adapter is never silently dropped.
 
 The resumed session's transcript gets a durable, model-visible user message:
 an interrupted one is told its turn was cut off and that in-flight tool calls,

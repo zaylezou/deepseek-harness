@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-anywhere",
-  "version": "0.2.0-local.1",
+  "version": "0.2.1-local.1",
   "private": true,
   "description": "Restart dsh in place from the sidebar or an agent tool; every in-progress session is snapshotted before teardown and resumed after the restart. Fork of dsh-restart-anywhere 0.1.7.",
   "icon": "./icon.svg",
