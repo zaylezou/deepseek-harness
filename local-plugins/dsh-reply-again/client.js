@@ -45,14 +45,12 @@ window.__ModuleLoader__.load({
       zh: {
         'action': '重新回复这条消息',
         'hint': '把这条消息再发一次，让 agent 重新回答（发送失败、回复中断或进程重启后适用）',
-        'busy': '先等当前这轮回复结束',
         'unsupported': '这条消息带文件附件，暂时不能重发（文件凭证无法复用；图片可以）',
         'denied': '这个会话不允许发送消息',
       },
       en: {
         'action': 'Re-answer this message',
         'hint': 'Send this message again so the agent answers it afresh (failed send, interrupted reply, or a restart mid-turn)',
-        'busy': 'Wait for the current turn to finish',
         'unsupported': 'This message carries a file attachment, which cannot be replayed here (images can)',
         'denied': 'This session does not allow sending messages',
       },
@@ -146,7 +144,11 @@ window.__ModuleLoader__.load({
       })
       const [pending, setPending] = React.useState(false)
       const message = CACHE.get(source)
-      const blocked = !allowed ? t('denied') : running ? t('busy') : message?.hasFile ? t('unsupported') : null
+      // Hidden entirely while the agent works: there is nothing to re-answer
+      // until the Turn settles. The row keeps its width so the bubble does not
+      // jump when the control appears or disappears.
+      const visible = allowed && !running && message !== undefined
+      const blocked = message?.hasFile ? t('unsupported') : null
       const onRetry = () => {
         if (blocked !== null || pending || message === undefined) return
         setPending(true)
@@ -157,9 +159,8 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'dsh-ra-row' },
-        message === undefined
-          ? null
-          : h(Tooltip, { label: blocked ?? t('hint'), side: 'bottom', align: 'end' },
+        visible
+          ? h(Tooltip, { label: blocked ?? t('hint'), side: 'bottom', align: 'end' },
             h('button', {
               type: 'button',
               className: 'dsh-ra-button',
@@ -168,7 +169,8 @@ window.__ModuleLoader__.load({
               'aria-busy': pending ? true : undefined,
               onClick: blocked === null && !pending ? onRetry : undefined,
             },
-            h(IconRefreshOutlineRegular, null))))
+            h(IconRefreshOutlineRegular, null)))
+          : null)
     }
 
     return {

@@ -32,7 +32,7 @@ echoes decline through the entry's selector.
 | Text | The message text, verbatim, as one text block |
 | Images | Re-read with `session.readAttachment` and inlined as base64 prompt parts — the same shape a subagent continuation sends. Their per-prompt receipts are gone, but the bytes stay addressable |
 | Files | Refused. `PromptContentPart` takes a per-prompt `receiptId` for a generic file and nothing reconstructs one here, so the icon renders disabled and explains why |
-| While running | Disabled; a Turn cannot be re-asked over an in-flight one |
+| While running | Hidden; there is nothing to re-answer until the Turn settles (the row keeps its width, so the bubble does not shift) |
 | Failure | The Session's own prompt-error surface, exactly as for a failed draft send |
 | Success | Nothing but the new user message; the plugin adds no toast of its own |
 
