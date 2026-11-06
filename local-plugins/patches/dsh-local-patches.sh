@@ -16,7 +16,7 @@
 # anchors are gone (upstream moved: fix the patcher, never guess). The installer
 # then refuses to report success instead of shipping a half-patched plugin.
 #
-# dsh-webui-auth (0.3.6, the only local-patched package today):
+# dsh-webui-auth (0.3.6):
 #   fallback-seat.py     DSH 0.2.2 turned webServer.fallback into a Fetch
 #                        resource ({ resource }); 0.3.6 still calls it as a
 #                        function, so the token exchange 500s. Also drops the
@@ -29,25 +29,36 @@
 #                        ERR_TOO_MANY_REDIRECTS). The bridge page replaces the
 #                        302 with a same-site navigation.
 #
-# dsh-restart-anywhere (0.1.7, added with the 0.2.2-alpha.3 upgrade):
-#   root-agents.py       DSH 0.2.2 replaced agents.roots() with agents.list(),
-#                        so the plugin's `agents` injection threw and the
-#                        per-root dsh_restart registration never ran. A root
-#                        session is one whose header carries no parentSession.
+# dsh-restart-anywhere — NOT registered since 0.2.0-local.1.
+#   Upstream 0.1.7 needed root-agents.py because DSH 0.2.2 replaced
+#   agents.roots() with agents.list(), so the plugin's `agents` injection threw
+#   and the per-root dsh_restart registration never ran. The 0.2.0-local.1 fork
+#   (local-plugins/dsh-restart-anywhere, installed with `link:`) fixes that in
+#   the source itself — `agents.list()` plus a parentSession root gate — so it is
+#   no longer a pnpm-installed package and has nothing to re-patch after an
+#   install. Going back to the npm 0.1.7 tarball means re-adding the entry and
+#   the patcher from git history (deleted in the same commit).
+#
+# dsh-web-api-balance (1.0.5):
+#   sidebar-row.py       The package renders its balance chip in the composer
+#                        and a per-conversation cost column. This profile wants
+#                        one row in sidebar.footer.action, above Restart dsh,
+#                        with the wallet summary only. The Host half (route,
+#                        credentials, cache) is untouched.
 
 LOCAL_PATCH_FILES=(
   'dsh-webui-auth/index.js'
-  'dsh-restart-anywhere/lib/index.js'
+  'dsh-web-api-balance/client.js'
 )
 
 LOCAL_PATCH_PATCHERS=(
   'dsh-webui-auth/fallback-seat.py dsh-webui-auth/crosssite-bridge.py'
-  'dsh-restart-anywhere/root-agents.py'
+  'dsh-web-api-balance/sidebar-row.py'
 )
 
 LOCAL_PATCH_MARKERS=(
   'coreTokenExchange: peer-independent dsh-webui-auth-crosssite-bridge'
-  'root-agent gate: DSH 0.2.2 replaced agents.roots() with agents.list()'
+  'LOCAL_PATCH_SIDEBAR_BALANCE_ROW'
 )
 
 PATCH_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

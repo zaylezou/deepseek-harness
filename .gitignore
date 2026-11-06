@@ -5,6 +5,8 @@ apps/desktop/.env.macos
 apps/desktop/*.p12
 node_modules/
 lib/
+# local-plugins ship a packaged lib/ as source (no tsc step), so theirs is tracked.
+!local-plugins/*/lib/
 *.tsbuildinfo
 pnpm-debug.log
 .pnpm-store/
