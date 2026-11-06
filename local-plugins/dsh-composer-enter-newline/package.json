@@ -1,0 +1,32 @@
+{
+  "name": "dsh-composer-enter-newline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Enter inserts a newline in the composer; Ctrl+Enter (Cmd+Enter on macOS) sends the draft.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

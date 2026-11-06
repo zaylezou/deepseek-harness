@@ -1,0 +1,10 @@
+# dsh-composer-enter-newline bundle patch
+#
+# One row: the browser half (./client) rebinds the conversation composer's
+# Enter gestures; the Host half is a no-op so the package can be an ordinary
+# plugin row. Remove this row (or the bundle entry in the profile) to restore
+# the stock Enter-to-send behavior.
+
+- insert:
+    - id: composer-enter-newline
+      name: 'dsh-composer-enter-newline'

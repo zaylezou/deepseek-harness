@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Enter 换行",
+    "description": "在输入框里按 Enter 插入换行，按 Ctrl+Enter（macOS 为 Cmd+Enter）发送消息。"
+  }
+}
