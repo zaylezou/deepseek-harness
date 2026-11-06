@@ -1,133 +1,164 @@
-// dsh-restart-anywhere — browser half: two rows above Settings in the left
-// sidebar (icon only when the sidebar is collapsed to its rail):
-//   ↻ Restart dsh            — immediate: running sessions are interrupted and
-//                              resumed after the restart.
-//   ⏳ Restart when idle      — safe: waits for every running turn to finish,
-//                              then restarts. Nothing is cut off.
-// Click -> confirm -> POST, then poll until a server with a new boot id
-// answers, then reload. Hidden only where restart isn't supported (desktop app).
-window.__ModuleLoader__.load({ id: "dsh-restart-anywhere", factory: (require) => {
-  var module = { exports: {} };
-  const react = require("react");
-  const h = react.createElement;
-  const ROUTE = "api/dsh-restart"; // relative: works under a path prefix too
+// dsh-restart-anywhere — browser half: two rows in the sidebar's More menu
+// (the panel list's 更多), not as their own footer rows.
+//
+//   ↻ 立即重启 dsh      — immediate: running sessions are interrupted and
+//                          resumed after the restart (continue_prompt wakes the
+//                          caller; other sessions get an interruption notice).
+//   ⏰ 空闲时重启 dsh    — safe: waits until every running turn has finished,
+//                          then restarts; cancels instead of cutting work.
+//
+// Every string is localized through this plugin's own locale namespace, so the
+// rows, confirms, toasts, and failure messages follow the app language.
+window.__ModuleLoader__.load({ id: 'dsh-restart-anywhere', factory: (require) => {
+  const React = require('react')
+  const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { MenuItemButton, IconRefreshOutlineRegular, IconAlarmClockOutlineRegular } = primitives
+  const h = React.createElement
+  const { useState, useEffect, useCallback } = React
 
-  const base = {
-    height: 32, border: "none", borderRadius: 8, background: "transparent", font: "inherit", fontSize: 14,
-    color: "var(--dsw-alias-label-secondary, currentColor)", display: "flex",
-    alignItems: "center", gap: 8, cursor: "pointer"
-  };
-  const wideStyle = Object.assign({}, base, { width: "100%", padding: "0 10px" });
-  const railStyle = Object.assign({}, base, { width: 32, padding: 0, justifyContent: "center", margin: "0 auto" });
+  const ROUTE = 'api/dsh-restart' // relative: works under a path prefix too
+  /** Locale namespace owned by this plugin; the registration's translate seat. */
+  const NS = 'dsh-restart-anywhere'
+  /** Seconds a safe restart waits for running turns before cancelling. */
+  const WAIT_SECONDS = 120
 
-  function Icon(props) {
-    return h("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
-      strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round",
-      style: props.spin ? { animation: "dsh-sr-spin 1s linear infinite" } : undefined },
-      h("style", null, "@keyframes dsh-sr-spin{to{transform:rotate(360deg)}}"),
-      h("path", { d: "M21 12a9 9 0 1 1-2.64-6.36" }), h("path", { d: "M21 3v6h-6" }));
+  /** Baseline dictionaries: the locale service requires zh and en. */
+  const LOCALES = {
+    zh: {
+      'restart.now': '立即重启 dsh',
+      'restart.idle': '空闲时重启 dsh',
+      'confirm.now': '重启 dsh（{via}）？\n正在运行的会话会被打断，重启后会自动恢复。',
+      'confirm.idle': '等所有会话把当前这一轮跑完再重启 dsh？\n不会打断任何会话；最多等 {seconds} 秒，超时就取消这次重启。',
+      'via.systemd': 'systemd：{unit}',
+      'via.inplace': '原地重启',
+      'starting.now': 'dsh 正在重启…',
+      'starting.idle': '等 {count} 个会话收尾后重启…',
+      'starting.idle.none': '会话都空了，正在重启…',
+      'cancelled': '安全重启已取消：还有会话在忙。没有打断任何会话。',
+      'noReturn': 'dsh 在 5 分钟内没有回来，刷新页面看看。',
+      'failed': '重启失败：{message}',
+      'unsupported': '当前环境不支持重启 dsh。',
+    },
+    en: {
+      'restart.now': 'Restart dsh now',
+      'restart.idle': 'Restart when idle',
+      'confirm.now': 'Restart dsh ({via})?\nRunning sessions will be interrupted, then resumed automatically.',
+      'confirm.idle': 'Restart dsh after every session has finished the turn it is running?\n'
+        + 'Nothing is cut off. Waits up to {seconds}s, then cancels instead of interrupting anyone.',
+      'via.systemd': 'systemd: {unit}',
+      'via.inplace': 'in place',
+      'starting.now': 'Restarting dsh…',
+      'starting.idle': 'Waiting for {count} session(s) to finish…',
+      'starting.idle.none': 'All sessions are idle; restarting…',
+      'cancelled': 'The safe restart was cancelled: sessions were still working. Nothing was interrupted.',
+      'noReturn': 'dsh did not come back within 5 minutes; try reloading the page.',
+      'failed': 'Restart failed: {message}',
+      'unsupported': 'Restart is not supported in this environment.',
+    },
   }
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const info = () => fetch(ROUTE, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null), () => null);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const info = () => fetch(ROUTE, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null), () => null)
 
-  /**
-   * Wait until a server with a different boot id answers: robust however fast or
-   * slow the restart is. `onTick` sees every poll, so a cancelled safe restart
-   * (no longer draining, same boot) can be told apart from a slow one.
-   */
+  /** One shared status line under the sidebar, replaced in place while a restart runs. */
+  let toastEl = null
+  let toastTimer = null
+  function toast(text, holdMs = 4000) {
+    if (typeof document === 'undefined') return
+    if (toastEl === null) {
+      toastEl = document.createElement('div')
+      toastEl.setAttribute('role', 'status')
+      toastEl.setAttribute('aria-live', 'polite')
+      toastEl.style.cssText = 'position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;'
+        + 'padding:8px 14px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#1f2329);'
+        + 'color:var(--dsw-alias-label-primary,#fff);font-size:13px;line-height:20px;'
+        + 'box-shadow:0 6px 24px rgba(0,0,0,.18);pointer-events:none;max-width:72vw'
+      document.body.appendChild(toastEl)
+    }
+    toastEl.textContent = text
+    toastEl.style.display = 'block'
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = holdMs > 0 ? setTimeout(() => { if (toastEl) toastEl.style.display = 'none' }, holdMs) : null
+  }
+
+  /** True once a server with a different boot id answers. `onTick` sees every poll. */
   async function waitForNewBoot(oldBoot, onTick) {
     for (let i = 0; i < 300; i++) {
-      await sleep(1000);
-      const b = await info();
-      if (b && b.boot && b.boot !== oldBoot) return true;
-      if (onTick) onTick(b);
+      await sleep(1000)
+      const b = await info()
+      if (b && b.boot && b.boot !== oldBoot) return true
+      if (onTick) onTick(b)
     }
-    return false;
+    return false
   }
 
-  function Shell(props) {
-    const label = props.label;
-    return h("button", { type: "button", style: props.wide ? wideStyle : railStyle, title: label, "aria-label": label,
-      disabled: props.busy, onClick: props.onClick,
-      onMouseEnter: (e) => { e.currentTarget.style.background = "var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.05))"; },
-      onMouseLeave: (e) => { e.currentTarget.style.background = "transparent"; } },
-      h(Icon, { spin: props.busy }), props.wide ? h("span", null, label) : null);
-  }
+  /** One restart at a time across both rows. */
+  let running = false
 
-  function RestartButton(props) {
-    const [how, setHow] = react.useState(null);
-    const [phase, setPhase] = react.useState("idle");
-    react.useEffect(() => { info().then(setHow); }, []);
-    if (!how || !how.mode) return null;
+  function RestartMenu({ onDismiss, t }) {
+    const [how, setHow] = useState(null)
+    useEffect(() => { info().then(setHow) }, [])
+    // A desktop app owns its own lifecycle; no rows there.
+    if (how !== null && !how.mode) return null
 
-    const onClick = async () => {
-      if (phase === "busy") return;
-      const via = how.mode === "systemd" ? "systemd (" + how.unit + ")" : "an in-place restart";
-      if (!window.confirm("Restart dsh via " + via + "?\nRunning sessions will be interrupted, then resumed automatically after the restart.")) return;
-      setPhase("busy");
+    const begin = useCallback(async (idle) => {
+      onDismiss()
+      if (running) return
+      const current = how ?? await info()
+      if (!current || !current.mode) { toast(t('unsupported'), 5000); return }
+      const via = current.mode === 'systemd' ? t('via.systemd', { unit: current.unit }) : t('via.inplace')
+      const confirmText = idle ? t('confirm.idle', { seconds: WAIT_SECONDS }) : t('confirm.now', { via })
+      if (!window.confirm(confirmText)) return
+      running = true
       try {
-        const res = await fetch(ROUTE, { method: "POST" });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
-        if (await waitForNewBoot(how.boot)) return window.location.reload();
-        throw new Error("dsh did not come back within 5 minutes");
-      } catch (e) {
-        setPhase("idle");
-        window.alert("Restart failed: " + (e && e.message ? e.message : e));
+        const url = idle ? ROUTE + '?when=idle&wait=' + WAIT_SECONDS : ROUTE
+        const res = await fetch(url, { method: 'POST' })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status)
+        if (!idle) {
+          toast(t('starting.now'), 0)
+          if (await waitForNewBoot(current.boot)) return window.location.reload()
+          toast(t('noReturn'), 8000)
+          return
+        }
+        toast(t('starting.idle', { count: body.waiting || 0 }), 0)
+        let cancelled = false
+        const arrived = await waitForNewBoot(current.boot, (b) => {
+          if (b && b.draining) {
+            const count = b.draining.waiting || 0
+            toast(count > 0 ? t('starting.idle', { count }) : t('starting.idle.none'), 0)
+          } else if (b && !b.draining && b.boot === current.boot) {
+            cancelled = true
+          }
+        })
+        if (arrived) return window.location.reload()
+        toast(cancelled ? t('cancelled') : t('noReturn'), 8000)
+      } catch (err) {
+        toast(t('failed', { message: err && err.message ? err.message : String(err) }), 8000)
+      } finally {
+        running = false
       }
-    };
+    }, [how, onDismiss, t])
 
-    return h(Shell, { wide: props.wide, busy: phase === "busy", onClick,
-      label: phase === "busy" ? "Restarting dsh…" : "Restart dsh" });
+    return h(React.Fragment, null,
+      h(MenuItemButton, {
+        icon: h(IconRefreshOutlineRegular, { size: 16 }),
+        separatorBefore: true,
+        onSelect: () => { void begin(false) },
+      }, t('restart.now')),
+      h(MenuItemButton, {
+        icon: h(IconAlarmClockOutlineRegular, { size: 16 }),
+        onSelect: () => { void begin(true) },
+      }, t('restart.idle')))
   }
 
-  function SafeRestartButton(props) {
-    const [how, setHow] = react.useState(null);
-    const [phase, setPhase] = react.useState("idle"); // idle | waiting
-    const [waiting, setWaiting] = react.useState(0);
-    react.useEffect(() => { info().then(setHow); }, []);
-    if (!how || !how.mode) return null;
-
-    const onClick = async () => {
-      if (phase === "waiting") return;
-      if (!window.confirm("Restart dsh after every session has finished the turn it is running?\n"
-        + "Nothing is cut off. This waits up to 2 minutes; if a session is still working then, the restart is cancelled.")) return;
-      setPhase("waiting");
-      try {
-        const res = await fetch(ROUTE + "?when=idle&wait=120", { method: "POST" });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || "HTTP " + res.status);
-        setWaiting(body.waiting || 0);
-        let cancelled = false;
-        const arrived = await waitForNewBoot(how.boot, (b) => {
-          if (b && b.draining) setWaiting(b.draining.waiting || 0);
-          else if (b && !b.draining && b.boot === how.boot) cancelled = true;
-        });
-        if (arrived) return window.location.reload();
-        setPhase("idle");
-        window.alert(cancelled
-          ? "The safe restart was cancelled: sessions were still working after the wait. Nothing was interrupted."
-          : "dsh did not come back within 5 minutes.");
-      } catch (e) {
-        setPhase("idle");
-        window.alert("Safe restart failed: " + (e && e.message ? e.message : e));
-      }
-    };
-
-    const label = phase === "waiting"
-      ? (waiting > 0 ? "Waiting for " + waiting + " session" + (waiting === 1 ? "" : "s") + "…" : "Restarting dsh…")
-      : "Restart when idle";
-    return h(Shell, { wide: props.wide, busy: phase === "waiting", onClick, label });
+  return {
+    inject: ['slots', 'locale'],
+    apply(ctx) {
+      ctx.effect(() => ctx.locale.register(NS, LOCALES), 'dsh-restart-anywhere: locales')
+      ctx.effect(() => ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({
+        name: 'sidebar.panellist.actions', id: 'dsh-restart-anywhere', order: 50, locale: NS,
+      }, RestartMenu)), 'dsh-restart-anywhere: sidebar More rows')
+    },
   }
-
-  module.exports.inject = ["slots"];
-  module.exports.apply = function (ctx) {
-    ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () =>
-      ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-restart-anywhere", order: 10 }, RestartButton)),
-      "dsh-restart-anywhere: sidebar button");
-    ctx.effect(() => ctx.slots.inject("sidebar.footer.action", () =>
-      ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-restart-anywhere-idle", order: 11 }, SafeRestartButton)),
-      "dsh-restart-anywhere: sidebar safe button");
-  };
-  return module.exports;
-} });
+} })

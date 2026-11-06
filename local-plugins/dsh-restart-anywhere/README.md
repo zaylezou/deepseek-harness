@@ -1,8 +1,11 @@
 # dsh-restart-anywhere (fork)
 
-Restart dsh **in place** — from the sidebar ↻ row, from the `dsh_restart`
-agent tool, or **without cutting anyone off** from `dsh_safe_restart` / the
-"Restart when idle" row, which waits for every running turn to finish first.
+Restart dsh **in place** — from the sidebar's 更多 (More) menu, from the
+`dsh_restart` agent tool, or **without cutting anyone off** from
+`dsh_safe_restart` / the menu's "空闲时重启 dsh" (Restart when idle) row, which
+waits for every running turn to finish first. Both rows and every confirm/toast
+follow the app language (zh/en dictionaries in `lib/client.js`; the plugin
+list's own title/description live in `locale/*.json`).
 
 This is the fork-local copy of [`dsh-restart-anywhere` 0.1.7][upstream] carried
 by this checkout. The restart mechanism (execve / wrapper / systemd timer, the
@@ -36,7 +39,7 @@ around it is not.
 | boot delivery | one follow-up, no flush check | one follow-up per entry, `sessions.flush` checked, failures isolated |
 | DSH 0.2.2 agent registry | broken (`agents.roots()`) | fixed (`agents.list()` + `parentSession` root gate) |
 | tool parameters | `continue_prompt` | `continue_prompt`, `reason` |
-| sidebar confirm | "sessions will be interrupted" | "interrupted, then resumed automatically" |
+| where it lives | one sidebar footer row | two rows in the sidebar 更多 menu, zh/en localized |
 | safe restart | — | `dsh_safe_restart` tool + "Restart when idle" row: waits for running turns, cancels instead of cutting work |
 
 What counts as **in progress**: a live top-level agent that still has a
@@ -69,8 +72,9 @@ instructions keep working.
 
 ## Safe restart
 
-`dsh_safe_restart` (and `POST /api/dsh-restart?when=idle&wait=<seconds>`) is the
-opposite trade-off from `dsh_restart`: instead of parking sessions and resuming
+`dsh_safe_restart` (and `POST /api/dsh-restart?when=idle&wait=<seconds>`, and
+the sidebar More menu's "空闲时重启 dsh") is the opposite trade-off from
+`dsh_restart`: instead of parking sessions and resuming
 them, it **waits** until no top-level session has a running turn, then restarts.
 Nothing is interrupted, so nothing is resumed — a session that was mid-turn
 finishes its turn and simply stays idle across the restart, with no notice in

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Restart Anywhere",
+    "description": "Restart dsh from the sidebar's More menu. Restart now interrupts running sessions and resumes them after boot; Restart when idle waits for every session to finish its turn, so nothing is cut off."
+  }
+}
