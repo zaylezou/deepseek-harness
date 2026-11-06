@@ -1,61 +1,77 @@
 /**
- * Browser half: one key in the composer flips the current session between
- * Full access and whatever preset it had before, with no risk-confirmation
- * dialog in between.
+ * Browser half: the composer's permission control, minus the risk gate.
  *
- * Why a plugin instead of the stock control: the composer chip (and the
- * General-settings row) route a Full-access pick through `RiskConfirmation` —
- * an acknowledgment checkbox plus an Enable button. That gate is deliberate
- * core UI, and it is the only thing standing between a pick and the switch.
- * The write path itself (`/permission <preset>` on the session) has no gate:
- * it appends the preset's two knob events and the `permissions` projection
- * pushes the new value into the chip. This plugin calls that path directly,
- * so enabling Full access is one key, not a dialog.
+ * Two things this plugin owns:
  *
- * The key is registered as a FIXED shortcut action, not an editable one,
- * because the core reserves Tab: `bindingIssue` reports `modifier-required`
- * for a bare Tab and `reserved` for every modified Tab, and the Web runtime
- * additionally rejects it through `isWebBindingAllowed`. A fixed row is the
- * only way to put Tab in the reference panel — it reserves the combination
- * against editable commands and shows up as a read-only row.
+ *  1. The composer chip itself (a shadow registration of the
+ *     `conversation.input.permission` slot). The stock chip routes a
+ *     Full-access pick through `RiskConfirmation` — an acknowledgment
+ *     checkbox plus an Enable button. That gate lives only in the component;
+ *     the write path (`/permission <preset>` on the session) appends the two
+ *     knob events and the `permissions` projection pushes the new value back
+ *     into the chip. This chip calls the write path directly, so every manual
+ *     pick lands immediately. It renders the same trigger, menu, glyphs, and
+ *     copy as the stock control.
+ *
+ *  2. A fixed shortcut action that cycles the current session through the
+ *     advertised presets in catalog order (read-only → workspace-write →
+ *     full access → read-only by default). It is registered as a FIXED action
+ *     rather than an editable one because the core reserves Tab:
+ *     `bindingIssue` reports `modifier-required` for a bare Tab and `reserved`
+ *     for every modified Tab, and the Web runtime additionally rejects it
+ *     through `isWebBindingAllowed`. The fixed row shows up in the reference
+ *     panel, reserves the combination against editable commands, and has no
+ *     edit affordance.
  *
  * Scope: Tab only fires while the caret is inside the composer card
  * (`[data-composer-card]`) and no dialog is open. Everywhere else — page,
  * sidebar, terminal, forms — Tab keeps its native focus movement, and
  * Shift+Tab still moves focus backwards out of the composer. A globally
  * swallowed Tab would make the whole app unusable from the keyboard.
- *
- * Full access applies the preset bundle (`danger-full-access` + approval
- * `never`), so the same key that lifts the sandbox also stops the per-call
- * approval prompts. Toggling back restores the preset the session had when it
- * entered Full access (memory is per session, in this page only).
  */
 window.__ModuleLoader__.load({
   id: 'dsh-permission-toggle',
-  factory: () => {
-    /** Locale namespace owned by this plugin. */
-    const NS = 'permission-toggle'
+  factory: (require) => {
+    const React = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    const {
+      Menu, IconChevronDownOutlineRegular,
+      PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular,
+      PermissionIconFullAccessRegular, PermissionIconAutoReviewRegular,
+    } = primitives
+    const h = React.createElement
 
-    /** Canonical preset key for Full access; the core chip writes the same literal. */
-    const FULL_PRESET = 'danger-full-access'
-    /** Preset restored when the session entered Full access from a derived state. */
-    const DEFAULT_PRESET = 'workspace-write'
-    /** Current values that name a derived state instead of a switch target. */
-    const DERIVED_PRESETS = new Set(['custom', 'auto'])
+    /** Locale namespace owned by this plugin; also the chip's translate seat. */
+    const NS = 'permission-toggle'
+    /** Preset keys used when the process catalog has not arrived yet. */
+    const DEFAULT_CYCLE = ['read-only', 'workspace-write', 'danger-full-access']
+    /** Catalog fallback so the chip never blanks out while a catalog read is failing. */
+    const FALLBACK_OPTIONS = DEFAULT_CYCLE.map(value => ({ value, name: value }))
     /** The composer capsule: the one region that owns Tab. */
     const COMPOSER = '[data-composer-card]'
     /** Marks the page while the toggle is installed (handy for diagnostics). */
     const MARKER = 'data-dsh-permission-toggle'
+    /** Owns this plugin's injected stylesheet. */
+    const STYLE_ATTR = 'data-dsh-permission-toggle-css'
     /** Visible toast lifetime before it fades; the node leaves after the transition. */
     const TOAST_MS = 1600
     /** Fade duration, matching the inline transition below. */
     const FADE_MS = 180
 
-    /** Built-in preset labels; unknown presets keep their raw key. */
-    const PRESET_LABELS = {
+    /** One glyph per built-in preset, following currentColor. */
+    const GLYPHS = {
+      'read-only': PermissionIconReadOnlyRegular,
+      'workspace-write': PermissionIconWorkspaceWriteRegular,
+      'danger-full-access': PermissionIconFullAccessRegular,
+      'auto': PermissionIconAutoReviewRegular,
+    }
+
+    /** Built-in preset label keys; host-configured names outside this set keep their own text. */
+    const LABEL_KEYS = {
       'read-only': 'preset.read-only',
       'workspace-write': 'preset.workspace-write',
       'danger-full-access': 'preset.full-access',
+      'auto': 'auto.label',
     }
 
     /** Baseline dictionaries: the locale service requires zh and en. */
@@ -63,10 +79,13 @@ window.__ModuleLoader__.load({
       zh: {
         'label': '切换权限模式',
         'key.tab': 'Tab',
+        'mode': '访问模式，当前：{name}',
+        'preset.read-only': '仅可查看',
+        'preset.workspace-write': '工作区内修改',
+        'preset.full-access': '完全权限',
+        'auto.label': '自动审查',
+        'auto.badge': 'EXP',
         'switched': '权限模式：{name}',
-        'preset.read-only': '只读',
-        'preset.workspace-write': '工作区写入',
-        'preset.full-access': '完全访问',
         'no-session': '没有打开的会话',
         'no-permission': '这个会话没有权限切换入口',
         'no-command': '宿主没有提供 /permission 命令',
@@ -75,10 +94,13 @@ window.__ModuleLoader__.load({
       en: {
         'label': 'Toggle permission mode',
         'key.tab': 'Tab',
-        'switched': 'Permission mode: {name}',
+        'mode': 'Access mode, current: {name}',
         'preset.read-only': 'Read only',
         'preset.workspace-write': 'Workspace write',
         'preset.full-access': 'Full access',
+        'auto.label': 'Auto review',
+        'auto.badge': 'EXP',
+        'switched': 'Permission mode: {name}',
         'no-session': 'No open session',
         'no-permission': 'This session has no permission control',
         'no-command': 'The host offers no /permission command',
@@ -86,18 +108,31 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /** Toast node and its fade timer, shared by every feedback path. */
+    /** Chip chrome copied from the stock control so the shadow is indistinguishable. */
+    const CSS = String.raw`
+.dsh-pt-trigger{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:220px;height:28px;padding:0 4px 0 8px;border:none;border-radius:var(--dsw-radius-sm);outline:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;font-weight:500;cursor:pointer}
+@media (hover:hover){.dsh-pt-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}}
+.dsh-pt-trigger:focus-visible{box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary))}
+.dsh-pt-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
+.dsh-pt-icon{display:inline-flex;flex:0 0 auto}
+.dsh-pt-icon svg{width:14px;height:14px}
+.dsh-pt-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-pt-chevron{display:inline-flex;flex:0 0 auto;color:var(--dsw-alias-label-caption);transition:transform 120ms ease}
+.dsh-pt-chevron-open{transform:rotate(180deg)}
+.dsh-pt-option{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%}
+.dsh-pt-option-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-pt-badge{flex:none;color:var(--dsw-alias-label-tertiary);font-size:8px;line-height:10px;font-weight:500;letter-spacing:.2px}
+@container (max-width:460px){.dsh-pt-trigger:has(.dsh-pt-icon) .dsh-pt-label{display:none}}
+`
+
+    /** Toast node and its timers, shared by every feedback path. */
     let toastEl = null
     let toastTimer = 0
     let toastFade = 0
-    /** The preset each session had when it entered Full access (page-local). */
-    const restore = new Map()
-    /** One toggle at a time; a held key must not stack commands. */
+    /** One Tab-driven cycle at a time. */
     let busy = false
 
-    /**
-     * Remove the toast node and both of its timers.
-     */
+    /** Remove the toast node and both of its timers. */
     const clearToast = () => {
       globalThis.clearTimeout(toastTimer)
       globalThis.clearTimeout(toastFade)
@@ -127,7 +162,7 @@ window.__ModuleLoader__.load({
           'background:var(--dsw-alias-bg-layer-2,#24272e)',
           'box-shadow:0 8px 28px rgba(0,0,0,.28)',
           'font:500 13px/20px system-ui,-apple-system,"Segoe UI",sans-serif',
-          `opacity:0`, `transition:opacity ${FADE_MS}ms ease`,
+          'opacity:0', `transition:opacity ${FADE_MS}ms ease`,
           'pointer-events:none', 'white-space:nowrap', 'overflow:hidden', 'text-overflow:ellipsis',
         ].join(';')
         document.body.appendChild(toastEl)
@@ -145,15 +180,21 @@ window.__ModuleLoader__.load({
       toastFade = globalThis.setTimeout(clearToast, TOAST_MS + FADE_MS + 40)
     }
 
+    /** Kebab-case a preset key the way the stock control labels unknown presets. */
+    const displayName = (name) => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)
+      ? name.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+      : name
+
     /**
-     * Render one preset key for the toast.
-     * @param preset - preset key the session switched to.
+     * Render one preset key.
+     * @param value - preset machine value.
      * @param t - the namespace's translate seat.
-     * @returns the localized built-in label, or the raw key.
+     * @param name - host-supplied label, when one was advertised.
+     * @returns the built-in label, the host label, or the title-cased key.
      */
-    const presetName = (preset, t) => {
-      const key = PRESET_LABELS[preset]
-      return key === undefined ? preset : t(key)
+    const labelOf = (value, t, name) => {
+      const key = LABEL_KEYS[value]
+      return key === undefined ? displayName(name ?? value) : t(key)
     }
 
     /**
@@ -169,7 +210,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Switch the main session to one preset through the ungated write path.
+     * Switch one session through the ungated write path.
      * @param ctx - the plugin context.
      * @param session - its live Session face.
      * @param preset - preset key to write.
@@ -181,10 +222,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Flip the main session between Full access and its previous preset.
+     * Cycle the main session through the advertised presets.
      * @param ctx - the plugin context.
+     * @param catalog - the process catalog shared with the chip.
      */
-    const toggle = async (ctx) => {
+    const cycle = async (ctx, catalog) => {
       const t = ctx.locale.bind(NS)
       if (busy) return
       busy = true
@@ -199,18 +241,13 @@ window.__ModuleLoader__.load({
           notify(t('no-permission'), true)
           return
         }
-        const current = selection.currentValue
-        const remembered = restore.get(session.sessionId)
-        const target = current === FULL_PRESET
-          ? (remembered === undefined || DERIVED_PRESETS.has(remembered) ? DEFAULT_PRESET : remembered)
-          : FULL_PRESET
-        // Remember what we left only once the switch lands, so a failed
-        // command cannot poison the next toggle.
-        await switchTo(ctx, session, target)
-        if (target === FULL_PRESET) {
-          restore.set(session.sessionId, DERIVED_PRESETS.has(current) ? DEFAULT_PRESET : current)
-        }
-        notify(t('switched', { name: presetName(target, t) }))
+        const advertised = catalog.values()
+        const order = advertised.length > 0 ? advertised : DEFAULT_CYCLE
+        const index = order.indexOf(selection.currentValue)
+        const next = order[(index + 1) % order.length]
+        await switchTo(ctx, session, next)
+        const option = catalog.getSnapshot()?.options.find(candidate => candidate.value === next)
+        notify(t('switched', { name: labelOf(next, t, option?.name) }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         notify(t('failed', { message }), true)
@@ -221,7 +258,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Test one physical gesture for the toggle.
+     * Test one physical gesture for the Tab shortcut.
      * @param input - fixed-input notification from the shortcuts adapter.
      * @returns whether this input is a bare Tab inside the open composer.
      */
@@ -236,11 +273,148 @@ window.__ModuleLoader__.load({
       return target instanceof Element && target.closest(COMPOSER) !== null
     }
 
+    /**
+     * Process permission catalog: one lazy read plus the invalidation event.
+     * @param ctx - the plugin context.
+     * @returns a tiny snapshot store the chip subscribes to.
+     */
+    const createCatalog = (ctx) => {
+      const listeners = new Set()
+      let value = null
+      const publish = () => { for (const listener of [...listeners]) listener() }
+      return {
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        getSnapshot: () => value,
+        /** Re-read the catalog; a host without the permission plugin keeps the last value. */
+        load: async () => {
+          try {
+            const remote = ctx.remote?.permissionPresets
+            if (remote === undefined) return
+            const result = await remote.catalog()
+            if (!result.ok) return
+            value = result.value
+            publish()
+          } catch (error) {
+            console.warn('[dsh-permission-toggle] catalog read failed:', error)
+          }
+        },
+        /**
+         * Preset keys the cycle walks: the configured table, in catalog order.
+         * `options` also carries live contributions such as the experimental
+         * Auto-review preset; `defaultOptions` is the configured set a user can
+         * actually pin, which is the three product modes on a stock deployment.
+         */
+        values: () => ((value?.defaultOptions ?? value?.options) ?? []).map(option => option.value),
+      }
+    }
+
     return {
-      inject: ['shortcuts', 'sessions', 'locale'],
+      // `remote.permissionPresets` is the Typert gate behind `ctx.remote.permissionPresets`:
+      // without it declared, the catalog read is refused and the chip has nothing to show.
+      inject: ['slots', 'shortcuts', 'sessions', 'locale', 'remote', 'remote.permissionPresets'],
       apply(ctx) {
         const t = ctx.locale.bind(NS)
         ctx.effect(() => ctx.locale.register(NS, LOCALES), 'dsh-permission-toggle: locales')
+
+        const catalog = createCatalog(ctx)
+        ctx.effect(() => {
+          const off = ctx.remote.$on('permission-presets/catalog-changed', () => { void catalog.load() })
+          void catalog.load()
+          return off
+        }, 'dsh-permission-toggle: catalog')
+
+        ctx.effect(() => {
+          const style = document.createElement('style')
+          style.setAttribute(STYLE_ATTR, '')
+          style.textContent = CSS
+          document.head.appendChild(style)
+          return () => { style.remove() }
+        }, 'dsh-permission-toggle: styles')
+
+        /**
+         * The stock composer chip without the risk gate: same trigger, same menu,
+         * same copy; a pick writes `/permission <id>` directly.
+         * @param props - slot props: owner `locked` plus the session standard kit.
+         * @returns the chip, or null while the capability or catalog is absent.
+         */
+        const PermissionChip = (props) => {
+          const selection = props.useProjection('permissions')
+          const live = React.useSyncExternalStore(catalog.subscribe, catalog.getSnapshot)
+          const [open, setOpen] = React.useState(false)
+          const [committing, setCommitting] = React.useState(false)
+          React.useEffect(() => { void catalog.load() }, [])
+          React.useEffect(() => {
+            if (props.locked) setOpen(false)
+          }, [props.locked])
+          if (selection === undefined) return null
+          const currentValue = selection.currentValue
+          const options = live?.options ?? FALLBACK_OPTIONS
+          const current = options.find(option => option.value === currentValue)
+          const currentLabel = labelOf(currentValue, t, current?.name)
+          const items = options.map((option) => {
+            const name = labelOf(option.value, t, option.name)
+            const badge = option.value === 'auto' ? t('auto.badge') : undefined
+            const Glyph = GLYPHS[option.value]
+            return {
+              id: option.value,
+              label: badge === undefined
+                ? name
+                : h('span', { className: 'dsh-pt-option', 'aria-label': `${name} ${badge}` },
+                  h('span', { className: 'dsh-pt-option-text' }, name),
+                  h('span', { className: 'dsh-pt-badge' }, badge)),
+              ...(Glyph === undefined ? {} : { icon: h(Glyph) }),
+            }
+          })
+          const choose = (id) => {
+            setOpen(false)
+            if (id === currentValue) return
+            setCommitting(true)
+            const session = ctx.sessions.binding(props.sessionId)?.session
+            const operation = session === undefined
+              ? Promise.reject(new Error(t('no-session')))
+              : switchTo(ctx, session, id)
+            void operation
+              .catch((error) => {
+                const message = error instanceof Error ? error.message : String(error)
+                notify(t('failed', { message }), true)
+                console.warn('[dsh-permission-toggle] switch failed:', error)
+              })
+              .finally(() => { setCommitting(false) })
+          }
+          const Glyph = GLYPHS[currentValue]
+          return h(Menu, {
+            open,
+            items,
+            selectedId: currentValue,
+            onSelect: choose,
+            onClose: () => { setOpen(false) },
+            side: 'top',
+            portal: true,
+            anchor: h('button', {
+              type: 'button',
+              className: 'dsh-pt-trigger',
+              'aria-label': t('mode', { name: currentLabel }),
+              title: current?.description,
+              disabled: props.locked || committing,
+              onClick: () => { setOpen(value => !value) },
+            },
+            Glyph === undefined ? null : h('span', { className: 'dsh-pt-icon', 'aria-hidden': true }, h(Glyph)),
+            h('span', { className: 'dsh-pt-label' }, currentLabel),
+            h('span', { className: open ? 'dsh-pt-chevron dsh-pt-chevron-open' : 'dsh-pt-chevron', 'aria-hidden': true },
+              h(IconChevronDownOutlineRegular)),
+            ),
+          })
+        }
+
+        // Same cell as the stock control, one rank lower: the lowest priority renders.
+        ctx.slots.inject('conversation.input.permission', () => ctx.slots.register({
+          name: 'conversation.input.permission',
+          priority: -1,
+          locale: NS,
+        }, PermissionChip))
 
         // The reference panel's read-only row. It also reserves Tab against
         // every editable command, so nothing else can claim the key.
@@ -257,13 +431,12 @@ window.__ModuleLoader__.load({
           // Consuming first stops the browser's focus move and keeps the
           // gesture out of the editable command dispatch.
           input.consume()
-          void toggle(ctx)
+          void cycle(ctx, catalog)
         }), 'dsh-permission-toggle: Tab listener')
 
         document.documentElement.setAttribute(MARKER, '')
         ctx.effect(() => () => {
           document.documentElement.removeAttribute(MARKER)
-          restore.clear()
           clearToast()
         }, 'dsh-permission-toggle: page marker')
       },
