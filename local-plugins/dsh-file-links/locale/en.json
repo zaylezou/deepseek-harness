@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "File links in chat",
+    "description": "Makes the file references an agent writes in its reply clickable, with an optional line: clicking opens the right sidebar at that file and line."
+  }
+}

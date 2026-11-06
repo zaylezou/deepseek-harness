@@ -1,0 +1,11 @@
+# dsh-file-links bundle patch
+#
+# One row: the browser half (./client) owns the clickable file vocabulary; the
+# Host half is a no-op so the package can be an ordinary plugin row. Remove
+# this row (or the bundle entry in the profile) to fall back to the stock
+# inline-code rendering, which links only a Turn's produced and delivered
+# files.
+
+- insert:
+    - id: file-links
+      name: 'dsh-file-links'

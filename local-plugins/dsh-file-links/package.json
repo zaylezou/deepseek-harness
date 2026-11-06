@@ -1,0 +1,32 @@
+{
+  "name": "dsh-file-links",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Clickable file references in agent replies: `path/to/file.ts:42` opens in the right sidebar at that line, like clicking a diff.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
