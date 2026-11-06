@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Enter for newline",
-    "description": "In the composer, Enter inserts a line break and Ctrl+Enter (Cmd+Enter on macOS) sends the draft."
+    "title": "Send keys",
+    "description": "Set Enter, Shift+Enter, and Ctrl/Cmd+Enter in the composer to newline, queue send, or force send."
   }
 }

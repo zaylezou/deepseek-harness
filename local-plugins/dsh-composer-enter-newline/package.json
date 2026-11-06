@@ -1,9 +1,9 @@
 {
   "name": "dsh-composer-enter-newline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Enter inserts a newline in the composer; Ctrl+Enter (Cmd+Enter on macOS) sends the draft.",
+  "description": "Configurable send keys for the composer: set Enter, Shift+Enter, and Ctrl/Cmd+Enter to newline, queue send, or force send.",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
