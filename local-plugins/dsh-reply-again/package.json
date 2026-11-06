@@ -1,0 +1,28 @@
+{
+  "name": "dsh-reply-again",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One 'Re-answer' control under a closed Turn: resend that Turn's message so the agent replies again, for a reply that was interrupted or never arrived.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

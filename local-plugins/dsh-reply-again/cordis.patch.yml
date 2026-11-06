@@ -1,0 +1,9 @@
+# dsh-reply-again bundle patch
+#
+# One row: the browser half (./client) owns the Turn-tail re-answer control;
+# the Host half is a no-op so the package can be an ordinary plugin row.
+# Remove this row (or the bundle entry in the profile) to drop the control.
+
+- insert:
+    - id: reply-again
+      name: 'dsh-reply-again'
