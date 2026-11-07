@@ -189,20 +189,53 @@ function createApprovalRelay(ctx, config) {
       let downstreamDone = false
       let downstreamOutcome = 'unavailable'
 
+      // The Web UI card is dismissed only when its Client-side presentation
+      // signal aborts: the Remote Event gateway sends a cancel frame for a
+      // projected request whose signal aborted. That signal is normally the
+      // tool's own cancellation signal, which must NOT abort when we decide
+      // from the phone (it would kill the very tool we just approved). So
+      // downstream answerers get a presentation-lifetime signal of our own,
+      // mirroring the tool signal but also aborted when this request settles.
+      const originalSignal = req.signal
+      const presentation = new AbortController()
+      const mirrorAbort = () => presentation.abort(originalSignal?.reason)
+      if (originalSignal !== undefined) {
+        if (originalSignal.aborted) presentation.abort(originalSignal.reason)
+        else originalSignal.addEventListener('abort', mirrorAbort, { once: true })
+      }
+      let presentationInstalled = false
+      try {
+        req.signal = presentation.signal
+        presentationInstalled = true
+      } catch (error) {
+        ctx.logger?.warn?.(`dsh-ntfy: approval card cannot be auto-dismissed (signal not writable): ${error?.message ?? error}`)
+      }
+
       const settle = (outcome) => {
         if (settled) return
         settled = true
         if (timer !== null) { clearTimeout(timer); timer = null }
         if (pushed !== null) { pending.delete(pushed.id); pushed = null }
         active.delete(settle)
-        req.signal?.removeEventListener('abort', onAbort)
+        originalSignal?.removeEventListener('abort', onAbort)
+        originalSignal?.removeEventListener('abort', mirrorAbort)
         resolve(outcome)
+        if (presentationInstalled) {
+          // Next macrotask: let the decided outcome reach the approval service
+          // first, then cancel the Client presentation (no-op if the page
+          // itself answered and already removed the card).
+          setTimeout(() => {
+            if (!presentation.signal.aborted) {
+              presentation.abort(new Error('approval was decided in another surface'))
+            }
+          }, 0)
+        }
       }
       const onAbort = () => settle('cancelled')
       active.add(settle)
 
-      if (disposed || req.signal?.aborted === true) { settle('cancelled'); return }
-      req.signal?.addEventListener('abort', onAbort, { once: true })
+      if (disposed || originalSignal?.aborted === true) { settle('cancelled'); return }
+      originalSignal?.addEventListener('abort', onAbort, { once: true })
 
       const handleDownstream = (outcome) => {
         downstreamDone = true
