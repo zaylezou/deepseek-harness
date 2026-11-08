@@ -88,7 +88,7 @@ async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8) {
   ctx.provide('sessionProjectionCache', {
     cachedSnapshot: (header: SessionRecord['header']) => {
       recordSummary('cold', header.id)
-      return { asOfSeq: -1, values: { sessionListMetadata: { blank: false, lastPromptAt: null } } }
+      return { asOfSeq: -1, values: { sessionListMetadata: { blank: false, lastPromptAt: null, lastActivityAt: null } } }
     },
     cachedPredecessorTitle: () => undefined,
   } as never)

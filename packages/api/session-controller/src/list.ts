@@ -27,6 +27,7 @@ const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 const sessionListMetadataSchema: z.ZodType<SessionListMetadata> = z.object({
   blank: z.boolean(),
   lastPromptAt: z.number().nullable(),
+  lastActivityAt: z.number().nullable().optional(),
 })
 
 const imageLimitsSchema = z.object({
@@ -48,13 +49,19 @@ export function applySessionListMetadata(
   state: SessionListMetadata,
   event: SessionEvent,
 ): SessionListMetadata {
+  const prompt = event.type === 'user/message' && event.data.source.kind === 'user'
   const blank = state.blank && event.type !== 'turn/start'
-  const lastPromptAt = event.type === 'user/message' && event.data.source.kind === 'user'
-    ? event.time
-    : state.lastPromptAt
+  const lastPromptAt = prompt ? event.time : state.lastPromptAt
+  // Recency covers both sides of the conversation: the human prompt that starts
+  // a turn and the assistant message that closes one. Injected context kinds
+  // stay out — they ride every turn and are not activity.
+  const lastActivityAt = prompt || event.type === 'assistant/message'
+    ? Math.max(state.lastActivityAt ?? state.lastPromptAt ?? 0, event.time)
+    : state.lastActivityAt
   return blank === state.blank && lastPromptAt === state.lastPromptAt
+    && lastActivityAt === state.lastActivityAt
     ? state
-    : { blank, lastPromptAt }
+    : { blank, lastPromptAt, lastActivityAt }
 }
 
 /**
@@ -92,7 +99,7 @@ export class ApiSessionList {
     this.listMetadata = await this.ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
       stateSchema: sessionListMetadataSchema,
-      init: () => ({ blank: true, lastPromptAt: null }),
+      init: () => ({ blank: true, lastPromptAt: null, lastActivityAt: null }),
       apply: applySessionListMetadata,
       wire: { viewSchema: sessionListMetadataSchema, view: state => state },
       stateVersion: 1,
@@ -366,7 +373,7 @@ function normalizeSearchQuery(query: string): string {
 }
 
 function updatedAt(header: SessionHeader, metadata: SessionListMetadata | undefined): number {
-  return Math.max(header.createdAt, metadata?.lastPromptAt ?? 0)
+  return Math.max(header.createdAt, metadata?.lastActivityAt ?? metadata?.lastPromptAt ?? 0)
 }
 
 function listFields(header: SessionHeader): {

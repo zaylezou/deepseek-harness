@@ -6,10 +6,11 @@
  * `session/follow` opening snapshot keeps serving them.
  */
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionFollowFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -112,6 +113,43 @@ describe('session.list summary payload', () => {
     for (const key of SUMMARY_EXCLUDED_KEYS) expect(served).not.toContain(key)
     // An ordinary wire unit is still there with its value.
     expect(row?.projections?.values.sessionListMetadata).toMatchObject({ blank: false })
+  })
+
+  it('orders a Session by its newest assistant message, not only by its prompt', async () => {
+    const { ctx } = await harness()
+    const now = vi.spyOn(Date, 'now')
+    let session
+    try {
+      now.mockReturnValue(5_000)
+      session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace', agentPreset: 'standard' } })
+      session.append('turn/start', { turn: 1 })
+      now.mockReturnValue(6_000)
+      session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'run the long task' }],
+        source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
+      // An assistant message closes a step long after the prompt: the row must
+      // report that later time, or a finished long turn stays buried below
+      // Sessions the user merely opened.
+      now.mockReturnValue(9_000)
+      session.append('assistant/message', {
+        turn: 1, step: 1,
+        message: createMessage({ role: 'assistant', content: [{ type: 'text', text: 'finished' }], source: { kind: 'model', provider: 'p', model: 'm' } }),
+        stream: [],
+      }, { surfaceOp: 'append' })
+    } finally {
+      now.mockRestore()
+    }
+
+    const response = await (await remote(ctx)).list({})
+    if (!response.ok) throw new Error('unreachable')
+    const row = response.value.items.find(item => item.sessionId === session.id)
+    expect(row?.updatedAt).toBe(9_000)
+    expect(row?.projections?.values.sessionListMetadata).toEqual({
+      blank: false,
+      lastPromptAt: 6_000,
+      lastActivityAt: 9_000,
+    })
   })
 
   it('keeps the excluded units on an opened Session\'s follow snapshot', async () => {

@@ -238,7 +238,12 @@ export class SessionController extends TypertRemoteService {
       ctx.emit('api-session/error', agent.id, errorChain(error))
     })
     ctx.on('session/event', (session, event) => {
-      if (event.type !== 'user/message' || event.data.source.kind !== 'user') return
+      // List ordering follows both sides of the conversation: a human prompt and
+      // the assistant message that answers it. Injected context kinds are not
+      // activity, so a resumed Session does not jump ahead of its own prompt.
+      if (event.type === 'user/message') {
+        if (event.data.source.kind !== 'user') return
+      } else if (event.type !== 'assistant/message') return
       ctx.emit('api-session/activity', session.id, event.time)
     })
   }

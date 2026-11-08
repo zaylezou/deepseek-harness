@@ -60,7 +60,7 @@ describe('Session open', () => {
 
   it('rejects a blank list hint when current metadata records a started conversation', async ({ mock, start }) => {
     const session = await sessionBench(mock, start, SID)
-    session.projections.apply('sessionListMetadata', { blank: false, lastPromptAt: 1200 }, SessionSeq(8))
+    session.projections.apply('sessionListMetadata', { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 }, SessionSeq(8))
 
     session.handleBlank(true)
 

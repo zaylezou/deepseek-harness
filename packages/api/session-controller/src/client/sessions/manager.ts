@@ -762,7 +762,7 @@ export class SessionManager {
         ...summary,
         // Cached list hints can precede a history opening or control update.
         blank: this.effectiveBlank(summary) && metadata?.blank !== false,
-        updatedAt: Math.max(summary.updatedAt, metadata?.lastPromptAt ?? 0),
+        updatedAt: Math.max(summary.updatedAt, metadata?.lastActivityAt ?? metadata?.lastPromptAt ?? 0),
         ...(typeof title === 'string' && title !== '' ? { title } : {}),
         ...(projectionValues === undefined ? {} : { projectionValues }),
       }

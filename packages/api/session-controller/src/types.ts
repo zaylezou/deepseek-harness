@@ -33,6 +33,14 @@ export interface SessionListMetadata {
   readonly blank: boolean
   /** Latest human-authored prompt time in the folded prefix. */
   readonly lastPromptAt: number | null
+  /**
+   * Latest activity time in the folded prefix: a human-authored prompt or an
+   * assistant message, whichever is newer. List rows order by this, so a long
+   * agent turn keeps its Session near the top after the prompt that started it.
+   * Absent on rows written before the field existed; readers fall back to
+   * {@link lastPromptAt} rather than dropping the row's recency.
+   */
+  readonly lastActivityAt?: number | null | undefined
 }
 
 /**
@@ -155,6 +163,7 @@ export interface SessionSummary {
   /** Current for attached Sessions; otherwise the persistence format status when reported. */
   readonly formatStatus?: 'current' | 'migration-required'
   readonly sessionId: SessionId
+  /** Newest durable conversation activity: the last prompt or assistant message, whichever is later. */
   readonly updatedAt: number
   readonly running: boolean
   readonly blank: boolean
@@ -693,7 +702,8 @@ declare module '@deepseek-ai/cordis' {
      */
     'api-session/status'(sessionId: SessionId, running: boolean): void
     /**
-     * One user-authored durable message advanced Session list activity.
+     * One durable conversation message advanced Session list activity: a
+     * user-authored prompt or an assistant message answering one.
      * @mode emit
      * @param sessionId - addressed Session identity.
      * @param updatedAt - durable message time used for list ordering.

@@ -450,6 +450,7 @@ describe('session.history projections block', () => {
     expect(after.projections.values.sessionListMetadata).toEqual({
       blank: true,
       lastPromptAt: session.eventAt(SessionSeq(session.seq - 1))?.time,
+      lastActivityAt: session.eventAt(SessionSeq(session.seq - 1))?.time,
     })
   })
 
@@ -462,7 +463,7 @@ describe('session.history projections block', () => {
     await fiber.await()
     await vi.waitFor(() => {
       expect(ctx.sessionProjections.snapshot(session).values.sessionListMetadata)
-        .toEqual({ blank: true, lastPromptAt: null })
+        .toEqual({ blank: true, lastPromptAt: null, lastActivityAt: null })
     })
     await fiber.dispose()
     expect('sessionListMetadata' in ctx.sessionProjections.snapshot(session).values).toBe(false)
@@ -484,6 +485,7 @@ describe('session.list projections column', () => {
     expect(row?.projections?.values.sessionListMetadata).toEqual({
       blank: false,
       lastPromptAt: session.eventAt(SessionSeq(session.seq - 1))?.time,
+      lastActivityAt: session.eventAt(SessionSeq(session.seq - 1))?.time,
     })
     expect(row?.projections?.asOfSeq).toBe(session.seq - 1)
   })
@@ -557,7 +559,7 @@ describe('session.list projections column', () => {
             asOfSeq: SessionSeq(7),
             values: {
               'test/last-user': { text: 'cached' },
-              sessionListMetadata: { blank: false, lastPromptAt: 6 },
+              sessionListMetadata: { blank: false, lastPromptAt: 6, lastActivityAt: 6 },
               title: 'Cached title',
             },
           }
@@ -573,7 +575,7 @@ describe('session.list projections column', () => {
       asOfSeq: 7,
       values: {
         'test/last-user': { text: 'cached' },
-        sessionListMetadata: { blank: false, lastPromptAt: 6 },
+        sessionListMetadata: { blank: false, lastPromptAt: 6, lastActivityAt: 6 },
         title: 'Cached title',
       },
     })
@@ -709,7 +711,7 @@ describe('session.list projections column', () => {
       expect(row?.projections).toMatchObject({
         kind: 'cached',
         asOfSeq: lastSeq,
-        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: promptTime } },
+        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: promptTime, lastActivityAt: promptTime } },
       })
     } finally {
       await second.fiber.dispose()
@@ -789,18 +791,18 @@ describe('Session control projection frames', () => {
       {
         type: 'projection', sessionId: session.id, seq: 0, changes: [
           { key: 'test/last-user', val: { text: 'm0' } },
-          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } },
+          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100, lastActivityAt: 100 } },
         ],
       },
       {
         type: 'projection', sessionId: session.id, seq: 1, changes: [
-          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 100 } },
+          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 100, lastActivityAt: 100 } },
         ],
       },
       {
         type: 'projection', sessionId: session.id, seq: 2, changes: [
           { key: 'test/last-user', val: { text: 'm0' } },
-          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 300 } },
+          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 300, lastActivityAt: 300 } },
         ],
       },
     ])
@@ -829,7 +831,7 @@ describe('Session control projection frames', () => {
       value: {
         type: 'projection', seq: 0, changes: [
           { key: 'test/last-user', val: { text: 'm0' } },
-          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } },
+          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100, lastActivityAt: 100 } },
         ],
       },
     })

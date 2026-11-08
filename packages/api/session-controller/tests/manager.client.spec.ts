@@ -378,9 +378,9 @@ describe('SessionManager instances', () => {
     const stopObserving = manager.subscribe(() => { published.resolve(undefined) })
     try {
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } }], seq: 8 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } }], seq: 8 })
       manager.handleControlFrame({ type: 'projection', sessionId: S2,
-        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 2 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null, lastActivityAt: null } }], seq: 2 })
       // The initial notification must finish while neither Session is resident.
       await published.promise
 
@@ -446,9 +446,9 @@ describe('list lifecycle', () => {
     const manager = makeManager(mock, remote)
     try {
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } }], seq: 8 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } }], seq: 8 })
       manager.handleControlFrame({ type: 'projection', sessionId: S2,
-        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 2 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null, lastActivityAt: null } }], seq: 2 })
       remote.session.list.mockResolvedValue(ok({ items: [
         summary(S1, { blank: true }), summary(S2),
       ] as never[] }))
@@ -457,7 +457,7 @@ describe('list lifecycle', () => {
       expect(manager.get(S1).getSnapshot().blank).toBe(false)
       expect(manager.get(S2).getSnapshot().blank).toBe(false)
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 7 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null, lastActivityAt: null } }], seq: 7 })
       expect(manager.getListSnapshot().items[0]).toMatchObject({ blank: false, updatedAt: 1200 })
     } finally {
       await manager.dispose()
@@ -489,7 +489,7 @@ describe('list lifecycle', () => {
     const stale = {
       ...summary(S1, { blank: true, cwd: '/workspace' }),
       projections: { kind: 'cached' as const, asOfSeq: 2, values: {
-        sessionListMetadata: { blank: true, lastPromptAt: null },
+        sessionListMetadata: { blank: true, lastPromptAt: null, lastActivityAt: null },
       } },
     }
     remote.session.list.mockResolvedValue(ok({ items: [stale] as never[] }))
@@ -501,7 +501,7 @@ describe('list lifecycle', () => {
 
       // History opening can be newer than the metadata-only list cache.
       session.projections.seed({ asOfSeq: SessionSeq(61), values: {
-        sessionListMetadata: { blank: false, lastPromptAt: 1200 },
+        sessionListMetadata: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 },
       } })
       await vi.waitFor(() => {
         expect(manager.getListSnapshot().items[0]).toMatchObject({ blank: false, updatedAt: 1200 })
@@ -647,14 +647,14 @@ describe('list lifecycle', () => {
     manager.handleControlFrame({
       type: 'projection', sessionId: S1, seq: 3, changes: [
         { key: 'title', val: 'Stale' },
-        { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } },
+        { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } },
       ],
     })
     expect(markDirty).toHaveBeenCalledOnce()
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(manager.getListSnapshot().items[0]).toMatchObject({ sessionId: S1, title: 'Newest', blank: false })
-    expect(manager.projectionValues(S1)).toMatchObject({ sessionListMetadata: { blank: false, lastPromptAt: 1200 } })
+    expect(manager.projectionValues(S1)).toMatchObject({ sessionListMetadata: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } })
   })
 
   it('fills cold titles from the list rows\' projections block as cached values', async ({ mock, remote }) => {

@@ -196,15 +196,15 @@ describe('sessions.list cold merge', () => {
       cachedSnapshot: (meta: SessionHeader) => {
         cacheCalls.push(String(meta.id))
         if (meta.id === sid('cached-blank')) {
-          return { asOfSeq: 0, values: { sessionListMetadata: { blank: true, lastPromptAt: null } } }
+          return { asOfSeq: 0, values: { sessionListMetadata: { blank: true, lastPromptAt: null, lastActivityAt: null } } }
         }
         if (meta.id === sid('cached-conversation')) {
-          return { asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1000 } } }
+          return { asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1000, lastActivityAt: 1000 } } }
         }
         if (meta.id === sid('seeded-cold')) {
           return {
             asOfSeq: 5,
-            values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200 } },
+            values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } },
           }
         }
         return undefined
@@ -235,7 +235,7 @@ describe('sessions.list cold merge', () => {
       projections: {
         kind: 'cached',
         asOfSeq: 5,
-        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200 } },
+        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200, lastActivityAt: 1200 } },
       },
     })
     expect(cacheCalls).toContain('seeded-cold')
