@@ -1,0 +1,7 @@
+# dsh-session-tariff bundle patch.
+#
+# Inserts the ledger row into the profile. The balance client reads its
+# /plugins/dsh-session-tariff/session-cost route to price a Session exactly.
+- insert:
+    - id: dsh-session-tariff
+      name: 'dsh-session-tariff'

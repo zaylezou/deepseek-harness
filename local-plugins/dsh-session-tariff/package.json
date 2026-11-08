@@ -1,0 +1,17 @@
+{
+  "name": "dsh-session-tariff",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Records per-session peak/off-peak token usage for dsh-web-api-balance's cost row.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
