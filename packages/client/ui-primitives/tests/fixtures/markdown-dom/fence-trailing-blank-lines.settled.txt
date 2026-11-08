@@ -27,7 +27,7 @@
                 #text "const"
               <span style="color:var(--shiki-token-constant)">
                 #text " doubled"
-              <span style="color:var(--shiki-token-keyword)">
+              <span style="color:var(--shiki-token-punctuation)">
                 #text " ="
               <span style="color:var(--shiki-token-constant)">
                 #text " true"

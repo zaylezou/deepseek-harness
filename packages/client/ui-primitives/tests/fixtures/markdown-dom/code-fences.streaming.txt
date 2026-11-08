@@ -15,11 +15,11 @@
               #text "const"
             <span style="color: var(--shiki-token-constant);">
               #text " answer"
-            <span style="color: var(--shiki-token-keyword);">
+            <span style="color: var(--shiki-token-punctuation);">
               #text ":"
             <span style="color: var(--shiki-token-constant);">
               #text " number"
-            <span style="color: var(--shiki-token-keyword);">
+            <span style="color: var(--shiki-token-punctuation);">
               #text " ="
             <span style="color: var(--shiki-token-constant);">
               #text " 42"
@@ -62,7 +62,7 @@
               #text "const"
             <span style="color: var(--shiki-token-constant);">
               #text " withMeta"
-            <span style="color: var(--shiki-token-keyword);">
+            <span style="color: var(--shiki-token-punctuation);">
               #text " ="
             <span style="color: var(--shiki-token-constant);">
               #text " true"

@@ -295,6 +295,18 @@ const cssVariablesTheme = createCssVariablesTheme({
 })
 
 /**
+ * Operators (`=`, `:`, `=>`, `+`) are `keyword.operator` in every grammar, and
+ * the factory above files that scope under keywords, so an operator would take
+ * the palette's keyword color. Append the rule instead of editing the table:
+ * shiki resolves equally specific scopes in table order, so the later entry
+ * wins and operators land on the palette's punctuation slot.
+ */
+cssVariablesTheme.tokenColors = [
+  ...(cssVariablesTheme.tokenColors ?? []),
+  { scope: ['keyword.operator'], settings: { foreground: 'var(--shiki-token-punctuation)' } },
+]
+
+/**
  * The client regex engine compiles each TextMate pattern when its scanner is
  * created. Shiki otherwise defers patterns longer than 3,000 characters until
  * their first match; that compilation counts against Shiki's 500 ms per-line
