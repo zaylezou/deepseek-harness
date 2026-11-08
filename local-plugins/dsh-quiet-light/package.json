@@ -1,0 +1,28 @@
+{
+  "name": "dsh-quiet-light",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VS Code Quiet Light syntax palette for the Web GUI: one injected stylesheet remapping the --shiki-token-* values that ui-theme publishes, with no change to the theme package or the highlighter.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

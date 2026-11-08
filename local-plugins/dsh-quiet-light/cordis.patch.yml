@@ -1,0 +1,9 @@
+# dsh-quiet-light bundle patch
+#
+# One row: the browser half (./client) owns the syntax palette; the Host half
+# is a no-op so the package can be an ordinary plugin row. Remove this row (or
+# the bundle entry in the profile) to fall back to ui-theme's stock palette.
+
+- insert:
+    - id: quiet-light
+      name: 'dsh-quiet-light'
