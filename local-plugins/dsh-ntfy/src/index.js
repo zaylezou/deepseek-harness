@@ -142,13 +142,29 @@ const APPROVAL_ACTIONS = new Map([
 ])
 
 /**
+ * Pick the approval text shown on the phone. Prefer the request's localized
+ * copy (approval sources such as Auto review ship it); fall back to the raw
+ * reason for older or unlocalized requests.
+ * @param req - the pending approval request.
+ * @returns the reason text, already trimmed.
+ */
+function approvalReason(req) {
+  const localized = req?.displayReason
+  if (localized !== null && typeof localized === 'object') {
+    const text = localized.zh ?? localized.en
+    if (typeof text === 'string' && text.trim() !== '') return text.trim()
+  }
+  return String(req?.reason ?? '').trim()
+}
+
+/**
  * Human-readable body for an approval push. The reason is the model's / hook's
  * own text, so it is passed through verbatim (trimmed and capped).
  * @param req - the pending approval request.
  * @returns the notification body.
  */
 function approvalMessage(req) {
-  const reason = String(req.reason ?? '').trim()
+  const reason = approvalReason(req)
   return [
     `工具：${req.toolName}`,
     `原因：${reason === '' ? '（没有说明）' : (reason.length > 1200 ? `${reason.slice(0, 1200)}…` : reason)}`,
