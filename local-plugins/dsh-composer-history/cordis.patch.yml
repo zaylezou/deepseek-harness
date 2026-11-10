@@ -1,0 +1,10 @@
+# dsh-composer-history bundle patch
+#
+# One row: the browser half (./client) adds the Up/Down history stepper to the
+# composer tool row; the Host half is a no-op so the package can be an ordinary
+# plugin row. Remove this row (or the bundle entry in the profile) to drop the
+# stepper.
+
+- insert:
+    - id: composer-history
+      name: 'dsh-composer-history'

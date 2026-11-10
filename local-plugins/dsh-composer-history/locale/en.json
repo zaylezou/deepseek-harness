@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Composer history",
+    "description": "Adds Up/Down buttons to the composer tool row that recall messages you already sent, like shell history."
+  }
+}
