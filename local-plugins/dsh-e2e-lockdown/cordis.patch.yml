@@ -1,0 +1,23 @@
+# dsh-e2e-lockdown bundle patch
+#
+# Host-only. 默认 `mode: auto`，只在 DSH_E2E_INSTANCE=1 的隔离实例里生效；
+# `e2e_instance up` 会在临时 profile 里把这一行覆盖成 `mode: always` 并带上
+# 实例自己的 workspaceRoot。装到普通 profile 里不会误锁真实会话。
+#
+# 真正的强制逻辑在 src/index.js（resolve 夹紧、approval never、工具 guard），
+# 这里的 config 只是默认值；profile patch 按整块替换 config，所以 e2e 覆盖时
+# 会同时写全 workspaceRoot / denyTools。
+
+- insert:
+    - id: dsh-e2e-lockdown
+      name: 'dsh-e2e-lockdown'
+      config:
+        mode: 'auto'
+        sandboxMode: 'workspace-write'
+        workspaceRoot: ''
+        denyTools:
+          - 'plugin_manager'
+          - 'e2e'
+          - 'e2e_instance'
+          - 'ntfy_send'
+          - 'ntfy_send_file'

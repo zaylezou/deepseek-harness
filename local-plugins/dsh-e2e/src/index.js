@@ -1,13 +1,7 @@
 /**
- * dsh-e2e — 专用无头浏览器的端到端测试工具。
+ * dsh-e2e — 隔离实例上的 Web GUI 端到端测试工具。
  *
- * 为什么要有它：验证 Web GUI 的改动时，以前是借 mijia-geek 那个 Playwright
- * 容器（docker cp 脚本 + docker exec + 从 dsh-webui-auth 里抠 token +
- * docker cp 截图回来）。那容器里跑着米家的持久登录浏览器，两边互相踩。
- *
- * 这个插件把整条链路收成一个工具调用：起一台专用 Chromium（默认是独立的
- * docker 容器，和 mijia 无关）、带上 DSH 登录态、按步骤操作页面、把 console
- * 错误和关键截图直接作为工具结果返回。
+ * e2e 只打开 e2e_instance 的 URL；正式入口在启动浏览器前和请求层各拦一次。
  */
 import Schema from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
@@ -15,26 +9,17 @@ import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ensureBrowser } from './browser.js'
-import { cookiesFor } from './auth.js'
-import { runSteps } from './steps.js'
-import { getInstance, registerInstanceTool } from './instance.js'
+import { assertAllowedTarget, guardConfig, isRequestAllowed } from './guard.js'
+import { gotoHref, runSteps } from './steps.js'
+import { DEFAULT_LOCKDOWN_DENY_TOOLS, getInstance, registerInstanceTool } from './instance.js'
 
 export const name = 'dsh-e2e'
 export const inject = ['tools']
 
 export const Config = Schema.object({
-  baseUrl: Schema.string()
-    .default('')
-    .description('默认打开的地址；留空则每次调用必须传 url'),
-  auth: Schema.string()
-    .default('none')
-    .description('登录态来源：dsh = 复用 dsh-webui-auth 的会话 token；none = 不带登录态'),
-  sessionsFile: Schema.string()
-    .default('')
-    .description('dsh-webui-auth 的 sessions.jsonl 绝对路径；auth=dsh 时必填'),
-  cookieName: Schema.string()
-    .default('dsh_wua_session')
-    .description('会话 cookie 名'),
+  protectedOrigins: Schema.array(Schema.string())
+    .default([])
+    .description('正式环境入口（反代 URL 等）；e2e 拒绝这些 origin。真实值只写在 profile patch 里'),
   cdpUrl: Schema.string()
     .default('http://127.0.0.1:9334')
     .description('专用浏览器的 CDP 地址'),
@@ -88,7 +73,17 @@ export const Config = Schema.object({
     .description('凭据从哪个 DSH_HOME 取；留空用 DSH_HOME 环境变量或 ~/.dsh'),
   instanceHost: Schema.string()
     .default('')
-    .description('临时实例监听地址；留空用镜像过来的 profile 配置，实际地址以启动日志里打印的为准'),
+    .description('临时实例监听地址；留空时锁定实例只绑 127.0.0.1，实际地址以启动日志里打印的为准'),
+  lockdown: Schema.boolean()
+    .default(true)
+    .description('临时实例默认限权：workspace-write 上限 + 审批全拒绝 + 禁用 plugin/MCP 管理与越权工具；'
+      + 'false 只用于调试锁定插件本身'),
+  lockdownPackageDir: Schema.string()
+    .default('')
+    .description('dsh-e2e-lockdown 包目录；留空用同级 local-plugins/dsh-e2e-lockdown'),
+  lockdownDenyTools: Schema.array(Schema.string())
+    .default(DEFAULT_LOCKDOWN_DENY_TOOLS)
+    .description('锁定实例里直接拒绝的工具名；默认含 plugin_manager / e2e / e2e_instance / ntfy_send*'),
   instancesDir: Schema.string()
     .default('')
     .description('临时实例的 home 与状态文件放哪；留空用 ~/.cache/dsh-e2e/instances'),
@@ -99,7 +94,7 @@ export const Config = Schema.object({
 
 const STEPS_DOC =
   '步骤写法：每步一个对象，键名就是动作。'
-  + 'goto:"url"；click:"selector"（可选 nth）；fill:{selector,value}；press:"Enter"；hover:"selector"；'
+  + 'goto:"/path"；click:"selector"（可选 nth）；fill:{selector,value}；press:"Enter"；hover:"selector"；'
   + 'selectOption:{selector,value}；waitFor:{selector,state?:visible|attached|hidden|detached}；wait:毫秒；'
   + 'eval:"(() => ...)()" 取值；screenshot:{name?,selector?,fullPage?}；'
   + 'assert:{url?|selector?,text?,count?,visible?,value?}；setViewport:{width,height}；reload:true。'
@@ -269,29 +264,23 @@ export function apply(ctx, config) {
   ctx.tools.register({
     name: 'e2e',
     description:
-      '用一台专用无头 Chromium 打开页面、按步骤操作并截图，做 Web GUI 的端到端测试。'
-      + 'auth=dsh 时自动带上 DSH 登录态，收集 console 错误/警告、失败请求和 HTTP ≥400，关键截图直接作为图片返回。'
+      '用一台专用无头 Chromium 打开 e2e_instance 起的隔离实例，按步骤操作并截图。'
+      + '只测临时实例：正式环境入口和登录态都不交给浏览器工具，不传 instance 会直接拒绝。'
+      + '收集 console 错误/警告、失败请求和 HTTP ≥400，关键截图直接作为图片返回。'
       + '浏览器是独立的（默认自动起一个专用容器），不占用 mijia 容器，也不碰用户正在使用的浏览器。'
       + '传 session 时同一名称的后续调用复用同一个页面（不重新导航），可把多步操作拆成几次调用；'
       + '传 closeSession 收尾。'
-      + '配合方式：先用 e2e_instance up 起一个隔离实例（返回 id 和 url），把 id 传给本工具的 instance，'
-      + '测完再 e2e_instance down；也可以直接传 url 测现成页面。'
       + STEPS_DOC,
     parameters: {
       type: 'object',
       properties: {
-        url: {
-          type: 'string',
-          description: '打开哪个地址；不填用插件配置的 baseUrl',
-        },
         instance: {
           type: 'string',
-          description: '用 e2e_instance 起的临时实例 id；给了就不必再传 url，且默认不带登录态',
+          description: 'e2e_instance 的实例 id（必填）；工具只打开这个实例的 URL',
         },
         session: {
           type: 'string',
-          description: '命名会话：同一 session 的后续调用复用同一页面（不重新导航），用来把多步操作拆成几次调用。'
-            + '换 url 会先导航到新地址；会话闲置 30 分钟或超过上限会自动关掉。',
+          description: '命名会话：同一 session 的后续调用复用同一个页面（不重新导航），可拆成几次调用；闲置 30 分钟或超过上限会自动关',
         },
         closeSession: {
           type: 'boolean',
@@ -299,7 +288,7 @@ export function apply(ctx, config) {
         },
         steps: {
           type: 'array',
-          description: '按顺序执行的步骤；首次打开会先 goto url，复用 session 且地址未变时不再导航',
+          description: '按顺序执行的步骤；首次打开实例 URL，复用 session 且地址未变时不再导航',
           items: { type: 'object', additionalProperties: true },
         },
         viewport: {
@@ -314,16 +303,6 @@ export function apply(ctx, config) {
         deviceScaleFactor: {
           type: 'number',
           description: '截图缩放倍率，默认 1；要 2x 就传 2',
-        },
-        auth: {
-          type: 'string',
-          enum: ['dsh', 'none'],
-          description: '登录态来源，默认用插件配置',
-        },
-        cookies: {
-          type: 'array',
-          description: '显式 cookie（name/value/domain?/path?）；给了就不读 token 文件',
-          items: { type: 'object', additionalProperties: true },
         },
         timeoutMs: {
           type: 'number',
@@ -342,7 +321,7 @@ export function apply(ctx, config) {
           description: '截图是否整页，默认 false（只截视口）',
         },
       },
-      required: ['steps'],
+      required: ['instance', 'steps'],
       additionalProperties: false,
     },
     output: {
@@ -368,19 +347,36 @@ export function apply(ctx, config) {
     },
     async execute(args, exec) {
       const started = Date.now()
+      for (const legacy of ['url', 'auth', 'cookies']) {
+        if (Object.hasOwn(args ?? {}, legacy)) {
+          throw new Error(
+            `e2e 不再接受 ${legacy}：只传 instance 和 steps。`
+            + '地址由实例决定，登录态由实例的 token 链接提供；正式环境入口不会交给浏览器工具。',
+          )
+        }
+      }
       const instanceId = String(args?.instance ?? '').trim()
-      let url = String(args?.url ?? '').trim()
-      if (!url && instanceId) url = (await getInstance(cfg, instanceId)).url
-      if (!url) url = String(cfg.baseUrl ?? '').trim()
-      if (!url) throw new Error('没有 url：传 url、传 instance，或在插件配置里设 baseUrl')
+      if (instanceId === '') {
+        throw new Error('e2e 只测 e2e_instance 的隔离实例：先调用 e2e_instance up，再把返回的 id 传给 instance。')
+      }
+      const instance = await getInstance(cfg, instanceId)
+      const url = instance.url
       let target
       try {
         target = new URL(url)
       } catch {
-        throw new Error(`url 不合法：${url}`)
+        throw new Error(`实例 URL 不合法：${url}`)
       }
 
       const steps = Array.isArray(args?.steps) ? args.steps : []
+      const guards = guardConfig(ctx.get('webServer'), cfg)
+      const guardOptions = { instanceOrigin: url, instanceId }
+      assertAllowedTarget(target, guards, guardOptions)
+      for (const step of steps) {
+        if (step === null || typeof step !== 'object' || !Object.hasOwn(step, 'goto')) continue
+        assertAllowedTarget(gotoHref(step.goto, target.href), guards, guardOptions)
+      }
+
       const timeoutMs = positive(args?.timeoutMs, positive(cfg.timeoutMs, 30000))
       const actionTimeoutMs = Math.min(
         positive(args?.actionTimeoutMs, positive(cfg.actionTimeoutMs, 8000)),
@@ -392,11 +388,9 @@ export function apply(ctx, config) {
       }
       const deviceScaleFactor = positive(args?.deviceScaleFactor, 1)
       const maxInline = Math.max(0, Math.floor(positive(cfg.maxScreenshots, 6)))
-      const authMode = String(args?.auth ?? (instanceId ? 'none' : cfg.auth) ?? 'none').trim() || 'none'
       const sessionId = String(args?.session ?? '').trim()
 
       const browser = await ensureBrowser(cfg)
-      const cookies = await cookiesFor(target, { ...cfg, auth: authMode }, args?.cookies)
 
       const runId = `${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`
       const shotDir = String(cfg.screenshotDir ?? '').trim() || join(tmpdir(), 'dsh-e2e', runId)
@@ -417,7 +411,6 @@ export function apply(ctx, config) {
       let navigated = false
       if (reused) {
         context = session.context
-        if (cookies.length > 0) await context.addCookies(cookies).catch(() => {})
         if (!samePage(session.url, url)) {
           await session.page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
           session.url = session.page.url()
@@ -434,7 +427,24 @@ export function apply(ctx, config) {
           viewport,
           deviceScaleFactor,
           locale: String(cfg.locale ?? '') || 'zh-CN',
+          serviceWorkers: 'block',
         })
+        await context.route('**/*', async (route) => {
+          if (!isRequestAllowed(route.request().url(), guards, url)) {
+            await route.abort('blockedbyclient').catch(() => {})
+            return
+          }
+          await route.continue().catch(() => {})
+        })
+        if (typeof context.routeWebSocket === 'function') {
+          await context.routeWebSocket(/.*/u, (socket) => {
+            if (!isRequestAllowed(socket.url(), guards, url)) {
+              socket.close()
+              return
+            }
+            socket.connectToServer()
+          })
+        }
         sink = collect()
       }
 
@@ -452,7 +462,6 @@ export function apply(ctx, config) {
 
       try {
         if (!reused) {
-          if (cookies.length > 0) await context.addCookies(cookies)
           page = await context.newPage()
           page.setDefaultTimeout(timeoutMs)
           page.setDefaultNavigationTimeout(timeoutMs)
@@ -477,6 +486,7 @@ export function apply(ctx, config) {
             timeoutMs,
             actionTimeoutMs,
             shotDir,
+            baseUrl: url,
             fullPage: args?.fullPage === true,
             finalScreenshot: args?.screenshot !== false && !endsWithScreenshot,
           })

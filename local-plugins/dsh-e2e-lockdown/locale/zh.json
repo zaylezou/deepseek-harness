@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "E2E 限权",
+    "description": "把隔离实例锁在 workspace-write 上限：审批一律拒绝，并移除所有能扩大边界的工具入口。"
+  }
+}

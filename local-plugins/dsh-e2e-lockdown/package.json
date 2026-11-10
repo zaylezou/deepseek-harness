@@ -1,0 +1,38 @@
+{
+  "name": "dsh-e2e-lockdown",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lock a DSH process to workspace-write plus deny-all approvals: no sandbox escalation, no plugin/MCP management, no out-of-workspace cwd.",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "e2e",
+    "sandbox",
+    "permissions"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

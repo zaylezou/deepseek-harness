@@ -52,6 +52,33 @@ function formatValue(value, limit = 600) {
 /** 导航动作吃全局超时；其它动作默认吃更短的 actionTimeoutMs，写错选择器别再空转几分钟。 */
 const NAV_ACTIONS = new Set(['goto', 'reload'])
 
+/**
+ * Resolve a goto step against the instance origin. The step is a path on the
+ * instance, never a URL: the tool decides the origin, the step only decides
+ * where inside it to go. Using the instance URL (not the current page URL)
+ * means a prior click cannot move the base of later navigations elsewhere.
+ * @param value the declared path, for example "/settings?tab=model".
+ * @param instanceUrl the instance URL whose origin is the only allowed base.
+ * @returns an absolute URL on the instance origin.
+ * @throws when the value is empty, not an absolute path, or protocol-relative.
+ */
+export function gotoHref(value, instanceUrl) {
+  const text = String(value ?? '').trim()
+  if (!text.startsWith('/') || text.startsWith('//') || text.includes('\\')) {
+    throw new Error('goto 只接受以 / 开头的实例内路径（例如 /settings），不接受 URL')
+  }
+  let base
+  try {
+    base = new URL(instanceUrl)
+  } catch {
+    throw new Error(`goto 需要已知的实例地址，当前是 ${String(instanceUrl)}`)
+  }
+  if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+    throw new Error(`goto 需要 HTTP(S) 实例地址，当前是 ${base.protocol}`)
+  }
+  return new URL(text, base.origin).href
+}
+
 function positiveNumber(value, fallback) {
   const n = Number(value)
   return Number.isFinite(n) && n > 0 ? n : fallback
@@ -70,7 +97,7 @@ async function runOne(page, kind, value, opts, capture) {
 
   switch (kind) {
     case 'goto':
-      await page.goto(String(value), { waitUntil: 'domcontentloaded', timeout })
+      await page.goto(gotoHref(value, opts.baseUrl), { waitUntil: 'domcontentloaded', timeout })
       return page.url()
 
     case 'reload':

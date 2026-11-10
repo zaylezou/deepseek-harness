@@ -1,24 +1,31 @@
 # dsh-e2e bundle patch
 #
-# 提供 `e2e` 工具：专用无头 Chromium + 步骤执行 + 截图。
-# 这里只放默认值；真实部署的 baseUrl / sessionsFile 属于本机配置，
-# 写在 <profile>/cordis.patch.yml 里覆盖整块 config。
+# 提供 `e2e` 工具：专用无头 Chromium + 步骤执行 + 截图，只测 e2e_instance 的隔离实例。
+# 这里只放默认值；正式环境入口属于本机配置，写在 <profile>/cordis.patch.yml。
 
 - insert:
     - id: dsh-e2e
       name: 'dsh-e2e'
       config:
-        # 默认打开的地址；留空 = 每次调用都要传 url
-        baseUrl: ''
-        # dsh = 自动复用 dsh-webui-auth 的会话 token；none = 不带登录态
-        auth: 'none'
-        # auth=dsh 时必填：dsh-webui-auth 的会话文件
-        sessionsFile: ''
-        cookieName: 'dsh_wua_session'
+        # 正式环境入口（反代 URL、正式端口）；真实值只写在 <profile>/cordis.patch.yml，不放在仓库里
+        protectedOrigins: []
         # 专用浏览器的 CDP 地址（容器用 host 网络，所以是回环地址）
         cdpUrl: 'http://127.0.0.1:9334'
-        # 临时实例监听地址；留空 = 用镜像过来的 profile 配置，实际地址以启动日志为准
+        # 临时实例监听地址；留空时锁定实例只绑 127.0.0.1，实际地址以启动日志为准
         instanceHost: ''
+        # 默认限权：workspace-write 上限 + 审批全拒绝 + 禁用 plugin/MCP 管理与越权工具
+        lockdown: true
+        # 留空 = 用同级的 local-plugins/dsh-e2e-lockdown
+        lockdownPackageDir: ''
+        # 锁定实例里 guard 直接拒绝的工具（plugin_manager 另有服务级写方法封装）
+        lockdownDenyTools:
+          - 'plugin_manager'
+          - 'e2e'
+          - 'e2e_instance'
+          - 'ntfy_send'
+          - 'ntfy_send_file'
+          - 'dsh_restart'
+          - 'dsh_safe_restart'
         # 连不上时自动起一个专用容器
         autoStart: true
         dockerImage: 'mcr.microsoft.com/playwright:latest'

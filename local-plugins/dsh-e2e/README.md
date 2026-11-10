@@ -1,102 +1,139 @@
 # dsh-e2e
 
-专用无头浏览器的端到端测试工具。给 DSH 的 Web GUI 用，也可以测任何网页。
+用专用无头 Chromium 测 DSH Web GUI 的端到端工具。只测 `e2e_instance` 起的隔离实例；正式环境入口和登录态都不交给浏览器工具。
 
-以前验证 GUI 改动是借 `mijia-geek` 那个 Playwright 容器：`docker cp` 脚本进去、
-`docker exec` 跑、从 `dsh-webui-auth` 的会话文件里抠 token、再把截图 `docker cp`
-回来。那容器里还跑着米家的持久登录浏览器，两边互相干扰。这个插件把整条链路收成
-一次工具调用。
+## 能做什么
 
-## 它做什么
+- `e2e_instance`：镜像当前 profile 的插件组合，在独立 `DSH_HOME`、随机端口和独立工作区里跑一个 `dsh web`；`up` / `down` / `list`。
+- **默认限权**：每个临时实例都会装上 `dsh-e2e-lockdown`，锁在 workspace-write 上限、审批全部拒绝，并关掉插件/MCP 管理、`e2e` / `e2e_instance` 等越权入口。`lockdown: false` 只留给调试锁定插件本身。
+- `e2e`：打开实例 URL，按声明式步骤操作（goto / click / fill / assert / eval / screenshot…），收集 console 错误、pageerror、失败请求和 HTTP ≥400，截图直接返回。
+- 命名会话：同一 `session` 的后续调用复用页面，可把「发消息 → 等回复 → 点结果」拆成多次调用。
+- 失败时自动多截一张 `failure`。
 
-- 起一台**专用** Chromium（默认是独立的 docker 容器 `dsh-e2e-browser`，host 网络，
-  CDP 在 `127.0.0.1:9334`），不和 mijia 共用；
-- `auth: dsh` 时自动从 `dsh-webui-auth` 的 `sessions.jsonl` 取一个未过期的会话
-  token 注入 cookie，不用每次手工抠；
-- 按声明式步骤操作页面（goto / click / fill / assert / eval / screenshot…）；
-- 收集 `console` 错误、`console` 警告、`pageerror`、失败请求，以及 **HTTP ≥400 响应**
-  （客户端插件 bundle 是批在一起取的，404 不会触发 `requestfailed`，要单独看）；
-- 截图落盘，并把前 N 张直接作为图片返回给模型；
-- 失败时自动截一张 `failure`，方便看现场；
-- **命名会话**：传 `session` 时，后续调用复用同一个页面、不再重新导航，可以把
-  「发消息 → 等回复 → 点结果」拆成几次调用，不用挤在一次里写完。
+## 安全边界
 
-## 用法（先用临时实例）
+### 浏览器侧（防误用/防误触）
+
+- **只测实例**：`e2e` 必须传 `instance`；没有 `url`、`auth`、`cookies` 入口，不能打开当前实例或任意网页。
+- **正式入口拒绝**：当前 web server 自己的 origin（含 `127.0.0.1` / `localhost` / `[::1]` 同端口别名）自动保护；反代/公网入口由 profile 的 `protectedOrigins` 提供。启动浏览器之前就报错，不会发请求。
+- **请求层再拦一次**：浏览器 context 会拦截 HTTP 和 WebSocket 请求；页面里点链接或 JS 导航到正式入口也会被 abort。私有/回环地址只放行当前实例 origin，公网资源（CDN/字体）仍可加载。
+- **只打开 HTTP(S)**：`file://`、`data:`、`javascript:` 一律拒绝。
+- **`goto` 只收 path**：例如 `/settings`，会按实例 origin 解析；绝对 URL、`//host`、`file:` 都拒绝。
+- **临时实例端口**：不能 bind 正式端口；实例自己的端口用 `DSH_E2E_INSTANCE=1` 允许，`protectedOrigins` 仍然拒绝。
+- 这是**防误用/防误触**护栏，不是对抗恶意代码的沙箱；`eval` 仍可执行任意 JS。
+
+### 实例侧（`dsh-e2e-lockdown`）
+
+`up` 默认 `lockdown: true`，把实例进程锁在：
+
+| 边界 | 做法 |
+|---|---|
+| 文件写 | `sandboxPolicy.resolve()` 夹到 `workspace-write` 上限，`workspaceRoot` 固定为实例工作区；UI 权限预设、恢复出来的 `danger-full-access` 都改不动实际执行 |
+| 审批 | `approval` 策略固定 `never`，进入 answerer 前再强制一次，并挂 prepend deny-all；页面审批、手机转发、hook 都拿不到批准 |
+| 提权重试 | 工具 guard 拒绝任何 `sandbox_permissions` / `justification` 调用 |
+| 宿主管理 | `plugin_manager` 工具被 guard 拒绝；`pluginManager` 的 install/enable/disable/remove/update 方法在服务层全部拒绝；`ui-plugin-manager` 页面关闭 |
+| MCP | 临时 profile 关闭 `mcp-manager`：不能新增会拉起任意进程的 server |
+| 实例嵌套 / 越界 | `e2e`、`e2e_instance` 在实例里被 guard 拒绝 |
+| 浏览器终端 | 临时 profile 关闭 `terminal-controller` / `ui-sidebar-terminal`：它是 host 直接 spawn 的 shell，源码里明确写着 without Agent sandbox or approval |
+| 重启插件 | 临时 profile 关闭 `dsh-restart-anywhere`：它从 cgroup 认出的是主实例的 `dsh-web.service`，在实例里点重启会重启主实例 |
+| 宿主控制命令 | `bash` / `pwsh` 直接拒绝 `docker`、`podman`、`systemctl`、`sudo`、`kill` 等命令名；这是减速带，刻意混淆或写脚本仍可绕过 |
+| 目录 | `subagent` / `schedule_*` / `working_directory` 的 cwd 必须在实例工作区内；workspace / session 创建、目录选择器“新建文件夹”的裸路径也必须在根内（宿主会在创建前 `mkdir`） |
+| 网络暴露 | 锁定实例默认只 bind `127.0.0.1`（`instanceHost` 显式指定除外） |
+
+启动时会在实例日志里写 `[dsh-e2e-lockdown] active: ...`；`up` 会检查这一行，**没看到就杀掉实例并报错**，不会把「看起来起来了、实际没锁」的实例交出去。
+
+这仍然不是 OS 隔离：`workspace-write` 允许读工作区外的文件，沙箱不拦网络，`/tmp` 属于 DSH 明确允许的平台临时区域。更重要的是，**同一 OS 用户**的 `docker` / `systemctl --user` / `kill` 等进程和 IPC 能力不受文件沙箱限制——如果运行 dsh 的用户能跑 `docker ps`，恶意实例可以用 Docker 挂宿主根目录直接越界。要防读、防出网、防这种同用户逃逸，需要独立用户/容器/VM，不在本插件范围内。
+
+## 工作区
+
+`e2e_instance up` 在当前工作区下创建：
+
+```
+<当前工作区>/e2e_instance/<实例名>/
+```
+
+这个文件夹就是实例唯一的工作区，不会把当前工作区整棵交给实例。实例的 `home` 和状态在 `~/.cache/dsh-e2e/instances/<id>/`；`down` 会删掉 home，但保留 `e2e_instance/<id>/`，方便查看测试产物，需要时手动删。
+
+实例名（`id`）只能包含字母、数字、点、下划线和短横线，1–64 位。
+
+## 用法
 
 ```jsonc
-// 1. 起一个隔离实例（独立 DSH_HOME + 随机端口，默认排除 QQ / webui-auth）
+// 1. 起一个隔离实例
 { "action": "up" }
-// → { "instance": { "id": "e2e-xxx", "url": "http://<实例地址>:<端口>/?token=..." } }
+// → instance.id = "e2e-xxx"
+// → instance.workspace.path = "<当前工作区>/e2e_instance/e2e-xxx"
 
-// 2. 用实例 id 跑测试；不用传 url，默认不带登录态
+// 2. 用实例 id 跑测试（实例 URL 和 token 由工具自己取）
 {
   "instance": "e2e-xxx",
-  "steps": [ { "waitFor": { "selector": "[data-composer-input]" } }, { "screenshot": { "name": "home" } } ]
+  "steps": [
+    { "waitFor": { "selector": "[data-composer-input][contenteditable=\"true\"]" } },
+    { "screenshot": { "name": "home" } }
+  ]
 }
 
-// 3. 用完关掉（进程 + 临时 home 一起删）
+// 3. 用完关掉
 { "action": "down", "id": "e2e-xxx" }
 ```
 
-拆成多次调用（同一 `session` 复用页面，不再重新加载）：
+拆成多次调用：
 
 ```jsonc
-// 第一次：发消息并等回复
+// 发消息并等回复
 { "instance": "e2e-xxx", "session": "chat",
   "steps": [ { "fill": { "selector": "[data-composer-input][contenteditable=\"true\"]", "value": "..." } },
              { "click": "button[aria-label=\"发送消息\"]" },
              { "waitFor": { "selector": "code button", "timeoutMs": 120000 } } ] }
 
-// 第二次：页面状态还在，直接点
+// 页面状态还在，直接点
 { "instance": "e2e-xxx", "session": "chat",
   "steps": [ { "click": "code button" }, { "screenshot": { "name": "opened" } } ] }
 
-// 收尾：关掉这条会话
+// 收尾
 { "instance": "e2e-xxx", "session": "chat", "closeSession": true, "steps": [] }
 ```
 
-也可以直接给 `url` 测任何地址（比如已经起好的实例或静态页面）：
-
-```jsonc
-{
-  "url": "https://dsh.example.com:9443/",
-  "steps": [
-    { "waitFor": { "selector": "[data-composer-input]" } },
-    { "assert": { "selector": "[data-composer-input]", "visible": true } },
-    { "click": "text=设置" },
-    { "wait": 300 },
-    { "screenshot": { "name": "settings" } },
-    { "eval": "(() => ({ title: document.title, w: innerWidth }))()" }
-  ]
-}
-```
-
-### 参数
+## e2e 参数
 
 | 参数 | 说明 |
 |---|---|
-| `instance` | `e2e_instance` 起的实例 id；给了就不必传 `url`，且默认 `auth: none` |
-| `url` | 打开哪个地址；不填用配置里的 `baseUrl` |
-| `steps` | 步骤数组，见下 |
+| `instance` | **必填**，`e2e_instance` 的实例 id；工具只打开这个实例的 URL |
+| `steps` | **必填**，步骤数组 |
+| `session` | 命名会话：同一 session 的后续调用复用页面；闲置 30 分钟或超过上限自动关 |
+| `closeSession` | 传了 `session` 时，本次跑完就关掉 |
 | `viewport` | `{width, height}`，覆盖默认视口 |
 | `deviceScaleFactor` | 截图缩放倍率，默认 1 |
-| `auth` | `dsh` / `none`，默认用插件配置 |
-| `cookies` | 显式 cookie 数组；给了就不读会话文件 |
-| `session` | 命名会话：同一 session 的后续调用复用同一页面；换 `url` 会先导航；闲置 30 分钟或超过上限自动关 |
-| `closeSession` | 传了 `session` 时，本次跑完就关掉它 |
-| `timeoutMs` | 全局超时（导航与各动作上限），默认 30000 |
-| `actionTimeoutMs` | 单个动作的默认超时，默认 8000，且不超过 `timeoutMs` |
+| `timeoutMs` | 全局超时（导航与动作上限），默认 30000 |
+| `actionTimeoutMs` | 单个动作默认超时，默认 8000，且不超过 `timeoutMs` |
 | `screenshot` | 跑完是否自动截 `final`，默认 `true` |
 | `fullPage` | 截图是否整页，默认 `false` |
 
-### 步骤
+## e2e_instance 参数
 
-每步一个对象，键名就是动作。`selector` 用 Playwright 语法：CSS、`text=`、
-`role=button[name="设置"]` 都可以。
+| 参数 | 说明 |
+|---|---|
+| `action` | `up` / `down` / `list` |
+| `id` | 实例 id；`up` 不填自动生成，`down` 必填 |
+| `enable` | `up` 时**只启用**这些 bundle；`dsh-base` / `dsh-web-app` 始终启用 |
+| `exclude` | `up` 时排除的 bundle，默认 `['dsh-qq-onebot', 'dsh-webui-auth', 'dsh-bili-watch', '@deepseek-ai/dsh-experimental-inspector-profile']` |
+| `port` | `up` 时指定端口，默认随机；正式端口会被拒绝 |
+| `lockdown` | `up` 时是否限权，默认 `true`；`false` 只用于调试锁定插件本身，会留下越权能力 |
+
+- 锁定实例里 `plugin_manager` 服务仍然在（standard 预设的 `tool-plugin-manager` 注入它，服务缺失会让会话创建失败），但所有写方法都被拒绝；不要因此以为能从页面或工具里改插件。
+- 排除 QQ：第二个实例再连一次 NapCat 会和主实例抢同一个 bot。
+- 排除 webui-auth：临时环境没有凭据；实例用启动日志里的 `?token=` 链接进入。
+- 排除 bili-watch / inspector：临时实例里固定 403 或端口冲突，纯噪声。
+- 临时实例和主实例在同一个 systemd service cgroup 里：dsh 重启会把它们一起带走，`list` 里显示 `dead`，重新 `up` 即可。
+- LLM 凭据默认从主实例的 `$DSH_HOME/.credentials.yaml` 快照进临时 home（`shareCredentials: false` 可关）。
+
+## 步骤
+
+每步一个对象，键名就是动作。`selector` 用 Playwright 语法：CSS、`text=`、`role=button[name="设置"]`。
 
 | 写法 | 说明 |
 |---|---|
-| `{ goto: "url" }` | 导航（第一步之前也会先打开 `url`） |
+| `{ goto: "/settings" }` | 导航到实例内路径；只接受以 `/` 开头的 path |
 | `{ reload: true }` | 重新加载 |
 | `{ click: "selector", nth?: 0 }` | 点击 |
 | `{ fill: { selector, value } }` | 填输入框 |
@@ -108,111 +145,56 @@
 | `{ eval: "(() => ...)()" }` | 在页面里求值，结果作为该步 detail 返回 |
 | `{ screenshot: { name?, selector?, fullPage? } }` | 截图；给了 selector 就截元素 |
 | `{ assert: { selector?, text?, count?, visible?, value?, url? } }` | 断言，失败即中止；`text` 支持 `/正则/` |
-| `{ setViewport: { width, height } }` | 改视口，测响应式 |
+| `{ setViewport: { width, height } }` | 改视口 |
 
-任何一步都可以带 `timeout` / `timeoutMs` 覆盖该步的超时（默认动作 8 秒、导航 30 秒）。
-等模型回合、等长任务这类才需要显式给大值，例如
-`{ "waitFor": { "selector": "code button" }, "timeoutMs": 120000 }`。
-
-失败时还会自动多截一张 `failure`。
-
-## 临时实例工具
-
-`e2e_instance` 用一个独立的 `DSH_HOME` 镜像当前 profile 的插件组合，在随机空闲端口
-跑一个 `dsh web`，不碰主实例的会话、存储和 QQ 连接。
-
-| 参数 | 说明 |
-|---|---|
-| `action` | `up` / `down` / `list` |
-| `id` | 实例 id；`up` 不填自动生成，`down` 必填 |
-| `enable` | `up` 时**只启用**这些 bundle（白名单）；`dsh-base` / `dsh-web-app` 始终启用，点名 enable 的 bundle 不受默认排除影响。不填 = 全部启用 |
-| `exclude` | `up` 时排除的 bundle，默认 `['dsh-qq-onebot', 'dsh-webui-auth', 'dsh-bili-watch', '@deepseek-ai/dsh-experimental-inspector-profile']`；显式 exclude 优先于 enable |
-| `port` | `up` 时指定端口，默认随机 |
-
-- 用 `enable` 隔离回归：`up { enable: ["dsh-file-links"] }` 只留基础组合 + 这个插件，
-  其余 bundle 不加载（同时在镜像的 patch 里追加禁用行，避免 override 悬空）。源 profile
-  里没有的名字会在结果里列成 ⚠，方便发现拼错。
-- 排除 QQ：第二个实例再连一次 NapCat 会和主实例抢同一个 bot。
-- 排除 webui-auth：临时环境没有凭据，留着只会把页面挡在首次设置页；实例用核心
-  启动时打印的 `?token=` 链接进入，e2e 每次新开浏览器都能用。实际地址由启动日志决定，
-  代码里不写死。
-- 排除 inspector：它固定在 9231 上开 devtools 桥，第二个实例抢不到端口，页面里会刷
-  一串 `ws://127.0.0.1:9231/ingest 403` 的噪声。
-- 排除 bili-watch：状态轮询在临时实例里固定 403，纯噪声。
-- 工作区在 `up` 时种好，**只能是调用工具那个会话的当前工作目录**（从
-  `workingDirectory.ensure(agent)` 取，不可另选）。临时实例的 `workspace.json`
-  只有这一个工作区，会话列表为空。
-- 状态和临时目录在 `~/.cache/dsh-e2e/instances/<id>/`，`down` 会把整个目录删掉。
-- 临时实例和主实例在同一个 systemd service cgroup 里：dsh 重启会把它们一起带走，
-  `list` 里显示 `dead`，重新 `up` 即可（不要以为它还在跑）。
-- LLM 凭据默认从主实例的 `$DSH_HOME/.credentials.yaml` **快照**一份进临时 home
-  （`shareCredentials: false` 可关）。用拷贝不用软链：临时实例的模型页也会写凭据，
-  软链会把写入带回真实 store；主实例换了 key，重新 `up` 即可。
-- 依赖安装用 `pnpm install --no-frozen-lockfile`（主 profile 的 lock 可能落后于
-  package.json）。
+任何一步都可以带 `timeout` / `timeoutMs` 覆盖该步超时。
 
 ## 配置
 
 ```yaml
-- insert:
-    - id: dsh-e2e
-      name: 'dsh-e2e'
-      config:
-        baseUrl: 'https://dsh.example.com:9443/'
-        auth: 'dsh'
-        sessionsFile: '/home/you/.dsh/profiles/web/.dsh-webui-auth/sessions.jsonl'
-        cdpUrl: 'http://127.0.0.1:9334'
-        instanceHost: ''          # 临时实例监听地址；留空用镜像 profile 的配置
-        timeoutMs: 30000          # 导航与全局上限
-        actionTimeoutMs: 8000     # 单个动作默认超时
-        sessionIdleMs: 1800000    # 命名会话闲置多久关掉
-        maxSessions: 4            # 同时保留几个命名会话
-        autoStart: true
-        dockerImage: 'mcr.microsoft.com/playwright:latest'
-        containerName: 'dsh-e2e-browser'
+- id: dsh-e2e
+  name: 'dsh-e2e'
+  config:
+    # 正式环境入口；插件自己的 origin 已自动保护。真实值只写在 profile patch。
+    protectedOrigins:
+      - 'https://dsh.example.com:9443'
+    cdpUrl: 'http://127.0.0.1:9334'
+    instanceHost: ''             # 临时实例监听地址；留空时锁定实例只绑 127.0.0.1
+    lockdown: true               # 默认限权；false 只用于调试锁定插件本身
+    lockdownPackageDir: ''       # 留空用同级 local-plugins/dsh-e2e-lockdown
+    lockdownDenyTools:           # 锁定实例里 guard 直接拒绝的工具
+      - plugin_manager
+      - e2e
+      - e2e_instance
+      - ntfy_send
+      - ntfy_send_file
+      - dsh_restart
+      - dsh_safe_restart
+    timeoutMs: 30000
+    actionTimeoutMs: 8000
+    sessionIdleMs: 1800000
+    maxSessions: 4
+    autoStart: true
+    dockerImage: 'mcr.microsoft.com/playwright:latest'
+    containerName: 'dsh-e2e-browser'
 ```
 
-- `auth: dsh` 读的是 dsh-webui-auth 的会话文件；token 过期（默认 12 小时，
-  取决于设置）后需要在 GUI 重新登录一次，工具会明确报错。
-- 浏览器容器用 `--network host` 是必须的：Chrome 的 DevTools 端口只接受回环
-  连接，走 docker 端口映射时对端是网桥地址（不是回环），连接会被 reset。
-- 没有 docker 的部署可以设 `executablePath` 指向本机 chromium，直接 launch。
-- 镜像里没有 Playwright 时，插件依赖 `playwright-core`（`npm install` 装在
-  插件目录下）。
-
-## 测试纪律
-
-- 测 GUI 时**不要打用户正在用的 profile / 地址**。用 `e2e_instance up` 起一个
-  独立实例，把实例 id 传给 `e2e`；测完 `down`。
-- 生产 GUI 只做只读冒烟时也要先确认没有任何会写入会话的操作（点会话、发消息、
-  答题都算写）。
+- `protectedOrigins` 比较时忽略 scheme 和 path，只认 `host:port`。
+- 浏览器容器用 `--network host` 是必须的：Chrome 的 DevTools 端口只接受回环连接。
+- 没有 docker 的部署可以设 `executablePath` 指向本机 chromium。
 
 ## 常见坑
 
-- **每次调用都加载新页面**：不传 `session` 时，每次调用都会 `goto url`，上一次调用里
-  打开的会话、发出的消息都不在了。多步操作要么写进一次调用，要么用 `session`。
-- **composer 有两个状态**：`[data-composer-input]` 先匹配到的是「选择工作区」的
-  inert 变体（`contenteditable="false"`）。等
-  `[data-composer-input][contenteditable="true"]` 再 fill，或者直接等页面稳定 3 秒。
-- **Enter 不一定是发送**：装了 `dsh-composer-enter-newline` 的 profile 里 Enter 只换行，
-  发送要点 `button[aria-label="发送消息"]`，而且草稿为空时它是 disabled。
-- **选择器写错时要快失败**：动作默认 8 秒超时；确实要等长任务就单独给该步
-  `timeoutMs`，别把全局超时调大来掩盖写错的选择器。
-- **看不到插件加载失败**：插件的 `apply` 抛错常进 `console.warn`，现在会一并报出来；
-  bundle 404 走 `HTTP ≥400` 那一栏。
-
-## 已知噪声
-
-- 默认会把主实例的 `.credentials.yaml` 快照进临时 home，所以一般不会有「开始使用」
-  引导框；只有 `shareCredentials: false` 或主实例没登录时才可能弹，测试里点 X 即可。
-- `dsh-bili-watch` 的 `/api/bili-watch/status` 在临时实例里会 403（两次），
-  和 e2e 本身无关；断言时忽略。
+- **不传 `session` 每次都会重新打开实例页**，上一次的消息和会话状态都不在。多步操作写进一次调用，或用 `session`。
+- `[data-composer-input]` 先匹配到的是「选择工作区」的 inert 变体；等 `[data-composer-input][contenteditable="true"]` 再 fill。
+- 装了 `dsh-composer-enter-newline` 的 profile 里 Enter 只换行；发送要点 `button[aria-label="发送消息"]`。
+- 插件 `apply` 抛错常进 `console.warn`；bundle 404 走 `HTTP ≥400` 那栏。
 - 失败时自动多截一张 `failure`，这是故意的。
 
 ## 文件
 
-- `src/index.js` — 插件注册、工具定义、结果拼装
+- `src/index.js` — 工具定义、结果拼装、请求层守卫接线
+- `src/guard.js` — 正式环境 origin / 端口守卫
 - `src/browser.js` — 浏览器容器 / CDP / 本机 launch
 - `src/steps.js` — 步骤执行器
-- `src/auth.js` — dsh-webui-auth 会话 token → cookie
-- `src/instance.js` — 临时实例的 up / down / list
+- `src/instance.js` — 临时实例的 up / down / list 与工作区

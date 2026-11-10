@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "E2E lockdown",
+    "description": "Caps an isolated instance at workspace-write, rejects every approval, and removes the tools that could widen the boundary."
+  }
+}

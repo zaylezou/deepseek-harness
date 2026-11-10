@@ -1,16 +1,8 @@
 /**
- * 临时 DSH 实例：给端到端测试用的隔离环境。
+ * e2e_instance：隔离的临时 DSH 实例。
  *
- * 为什么要它：测 GUI 时如果直接打用户正在用的实例，点会话、发消息、弹提问卡
- * 都会落进真实数据里。这里在独立的 DSH_HOME 里镜像当前 profile 的组合
- * （同样的 local 插件、同样的 patch），装一遍依赖后用随机端口单独跑一个
- * `dsh web`，测试完整个目录删掉。
- *
- * 默认排除两个 bundle：
- *   - dsh-qq-onebot：第二个实例再连一次 NapCat 会和主实例抢同一个 bot；
- *   - dsh-webui-auth：临时环境没有凭据，留着只会把页面挡在首次设置页；
- *   - dsh-bili-watch：它的状态轮询在临时实例里固定 403，纯噪声；
- *   - inspector：它会占住固定的 9231 端口，临时实例的页面连上去只会拿到 403。
+ * 独立 DSH_HOME、随机端口，工作区固定为 <当前工作区>/e2e_instance/<id>/。
+ * 镜像当前 profile 的插件组合，up 时装依赖并起 dsh web，down 时清理 home。
  */
 import { spawn } from 'node:child_process'
 import { execFile } from 'node:child_process'
@@ -21,6 +13,7 @@ import { existsSync } from 'node:fs'
 import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
+import { forbiddenPorts, guardConfig } from './guard.js'
 
 const run = promisify(execFile)
 
@@ -28,6 +21,106 @@ const DEFAULT_EXCLUDE = ['dsh-qq-onebot', 'dsh-webui-auth', 'dsh-bili-watch', '@
 
 /** 没有这两个 bundle 就没有页面可测；白名单也不能把它们剔掉。 */
 const REQUIRED_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+
+/** 每个临时实例都带上的限权插件；它是独立包，由 dsh-e2e 注入临时 profile。 */
+const LOCKDOWN_BUNDLE = 'dsh-e2e-lockdown'
+
+/** 锁定实例里直接拒绝的工具；plugin_manager 另有服务级禁用，这里是第二道。 */
+export const DEFAULT_LOCKDOWN_DENY_TOOLS = ['plugin_manager', 'e2e', 'e2e_instance', 'ntfy_send', 'ntfy_send_file', 'dsh_restart', 'dsh_safe_restart']
+
+function lockdownPackageDir(config) {
+  const configured = String(config.lockdownPackageDir ?? '').trim()
+  if (configured) return resolve(configured)
+  // src/ 的上两级是 dsh-e2e，再上一级是 local-plugins；限权插件与它同级。
+  return resolve(import.meta.dirname, '..', '..', LOCKDOWN_BUNDLE)
+}
+
+/** JSON 字符串就是合法的 YAML 双引号标量；路径里有冒号/空格也不会坏。 */
+function yamlQuote(value) {
+  return JSON.stringify(String(value))
+}
+
+/**
+ * 生成临时 profile 的锁定 patch。真实路径只进临时 home，不写进仓库。
+ *
+ * 关键点：后层 patch 整块替换 config，所以这里把 sandbox-policy / approval /
+ * permission / webserver 的整块键都写全；禁用行只按 id，不依赖 bundle 名字。
+ * @param {string} workspacePath - 实例唯一工作区（绝对路径）。
+ * @param {{host?: string, denyTools?: string[]}} [options] - 监听地址与额外禁用工具。
+ * @returns {string} 追加到 profile patch 末尾的 YAML 文本。
+ */
+export function buildLockdownPatch(workspacePath, options = {}) {
+  const host = String(options.host ?? '').trim() || '127.0.0.1'
+  const denyTools = Array.isArray(options.denyTools) && options.denyTools.length > 0
+    ? options.denyTools.map((name) => String(name).trim()).filter((name) => name !== '')
+    : DEFAULT_LOCKDOWN_DENY_TOOLS
+  const lines = [
+    '',
+    '# e2e 锁定：workspace-write 上限 + 审批全拒绝。由 dsh-e2e 自动追加。',
+    '# 不要把这些行挪到源 profile；workspaceRoot / host 是每个实例自己的值。',
+    '- id: sandbox-policy',
+    "  name: '@deepseek-ai/dsh-sandbox-policy'",
+    '  config:',
+    '    mode: workspace-write',
+    `    workspaceRoot: ${yamlQuote(workspacePath)}`,
+    '- id: approval',
+    "  name: '@deepseek-ai/dsh-user-approval'",
+    '  config:',
+    '    policy: never',
+    '- id: permission',
+    "  name: '@deepseek-ai/dsh-permission-presets'",
+    '  config:',
+    '    presets:',
+    '      locked:',
+    '        sandbox: workspace-write',
+    '        approval: never',
+    `        name: ${yamlQuote('锁定（e2e）')}`,
+    `        description: ${yamlQuote('临时实例：只能修改工作区，审批一律拒绝。')}`,
+    '    defaultPreset: locked',
+    '- id: webserver',
+    "  name: '@deepseek-ai/dsh-host-webserver'",
+    '  config:',
+    `    host: ${yamlQuote(host)}`,
+    '    port: !!js ctx.webStartup.port ?? 0',
+    '    compression: gzip',
+    '    compressionLevel: 1',
+    '    compressionThresholdBytes: 1024',
+    '# Auto review 的固定预设会要求最高权限 + 审批；锁定实例里不提供这个入口。',
+    '- id: auto-review',
+    '  disabled: true',
+    '# 插件管理服务不能直接禁用：standard 预设里的 tool-plugin-manager 注入它，',
+    '# 服务缺失会让所有会话创建失败。保留服务，由 dsh-e2e-lockdown 把写方法全部拒绝；',
+    '# 页面入口另关，避免从 UI 触发。',
+    '- id: ui-plugin-manager',
+    '  disabled: true',
+    '- id: ui-open-in-app',
+    '  disabled: true',
+    '# MCP server 由 host 进程拉起，能绕过文件沙箱；锁定实例不提供。',
+    '- id: mcp-manager',
+    '  disabled: true',
+    '# 浏览器终端是 host 直接 spawn 的 shell（源码里明确写了 without Agent sandbox or approval），',
+    '# 它会是整个锁定最大的旁路；连服务带 UI 一起关。',
+    '- id: terminal-controller',
+    '  disabled: true',
+    '- id: ui-sidebar-terminal',
+    '  disabled: true',
+    '# 打开本机应用同样属于 host 侧动作；headless 上也不该出现。',
+    '- id: open-in-app',
+    '  disabled: true',
+    '# 重启插件从 cgroup 认出的是主实例的 dsh-web.service；临时实例里点一下会重启主实例。',
+    '- id: dsh-restart-anywhere',
+    '  disabled: true',
+    '- id: dsh-e2e-lockdown',
+    "  name: 'dsh-e2e-lockdown'",
+    '  config:',
+    '    mode: always',
+    '    sandboxMode: workspace-write',
+    `    workspaceRoot: ${yamlQuote(workspacePath)}`,
+    '    denyTools:',
+    ...denyTools.map((name) => `      - ${yamlQuote(name)}`),
+  ]
+  return `${lines.join('\n')}\n`
+}
 
 function checkoutRoot() {
   // src/ 的上两级就是 fork 的 checkout 根目录；环境变量优先。
@@ -70,6 +163,7 @@ async function shareCredentials(config, home) {
  */
 async function seedWorkspace(config, home, workspacePath) {
   if (!workspacePath) return null
+  await mkdir(workspacePath, { recursive: true })
   const dir = join(home, 'storages')
   await mkdir(dir, { recursive: true })
   let template = null
@@ -132,6 +226,19 @@ function alive(pid) {
   }
 }
 
+/** 杀掉 detached 实例的进程组；失败时再单独杀一次主进程。 */
+function killTree(pid) {
+  try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
+  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+}
+
+/** Reject ids that could escape the instance directory or the workspace root. */
+function assertSafeId(id) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(id)) {
+    throw new Error(`实例 id 只能包含字母、数字、点、下划线和短横线（1-64 位），收到 "${id}"`)
+  }
+}
+
 async function readState(dir, id) {
   try {
     return JSON.parse(await readFile(join(dir, `${id}.json`), 'utf8'))
@@ -162,7 +269,7 @@ async function sleep(ms) {
   await new Promise((done) => setTimeout(done, ms))
 }
 
-async function mirrorProfile(config, home, exclude, enable = []) {
+async function mirrorProfile(config, home, exclude, enable = [], options = {}) {
   const source = sourceProfile(config)
   if (!existsSync(join(source, 'package.json'))) {
     throw new Error(`找不到源 profile：${source}（用 sourceProfileDir 指定）`)
@@ -187,23 +294,60 @@ async function mirrorProfile(config, home, exclude, enable = []) {
   const keep = wanted.length === 0
     ? bundles
     : bundles.filter((name) => REQUIRED_BUNDLES.includes(name) || wanted.includes(name))
-  const kept = keep.filter((name) => !exclude.includes(name))
+  // 限权插件是能力边界的一部分，不能被 enable 白名单漏掉，也不能被 exclude 关掉；
+  // lockdown:false 时反过来要把它拿掉，否则 DSH_E2E_INSTANCE=1 会让默认 mode:auto 自己激活。
+  const lockdown = options.lockdown === true
+  const lockdownExcluded = lockdown && exclude.includes(LOCKDOWN_BUNDLE)
+  let kept = keep.filter((name) => !exclude.includes(name))
+  if (!lockdown) kept = kept.filter((name) => name !== LOCKDOWN_BUNDLE)
   const dropped = bundles.filter((name) => !kept.includes(name))
+
+  if (lockdown) {
+    // 永远放在最后：它的 approval prepend / pluginManager wrapper 要拿到最外层。
+    kept = [...kept.filter((name) => name !== LOCKDOWN_BUNDLE), LOCKDOWN_BUNDLE]
+    manifest.dependencies = manifest.dependencies !== null && typeof manifest.dependencies === 'object'
+      ? manifest.dependencies
+      : {}
+    if (manifest.dependencies[LOCKDOWN_BUNDLE] === undefined) {
+      const dir = lockdownPackageDir(config)
+      if (!existsSync(join(dir, 'package.json'))) {
+        throw new Error(
+          `锁定插件 ${LOCKDOWN_BUNDLE} 不在 ${dir}。`
+          + '把 local-plugins/dsh-e2e-lockdown 放回去，或用 lockdownPackageDir 指定。',
+        )
+      }
+      manifest.dependencies[LOCKDOWN_BUNDLE] = `link:${dir}`
+    }
+  }
   manifest.dsh.profile.bundles = kept
   await writeFile(join(profile, 'package.json'), JSON.stringify(manifest, null, 2), 'utf8')
 
   // 被排除/未启用的 bundle 如果还有 override 行留在 patch 里，Loader 会找不到
   // 对应的 insert。追加禁用行比删行安全：禁用是幂等的，未知 id 也不会让启动失败。
   const patchFile = join(profile, 'cordis.patch.yml')
+  const chunks = []
   if (existsSync(patchFile)) {
-    const lines = ['', '# e2e 临时实例：关掉没启用的 bundle']
-    for (const name of [...new Set([...dropped, ...exclude])]) {
+    const existing = (await readFile(patchFile, 'utf8')).trimEnd()
+    if (existing !== '') chunks.push(existing)
+  }
+  const disabledNames = [...new Set([...dropped, ...exclude])]
+    .filter((name) => !(lockdown && name === LOCKDOWN_BUNDLE))
+  if (disabledNames.length > 0) {
+    const lines = ['# e2e 临时实例：关掉没启用的 bundle']
+    for (const name of disabledNames) {
       lines.push(`- id: '${name}'`, `  name: '${name}'`, '  disabled: true')
     }
-    await writeFile(patchFile, `${await readFile(patchFile, 'utf8')}\n${lines.join('\n')}\n`, 'utf8')
+    chunks.push(lines.join('\n'))
   }
+  if (lockdown) {
+    chunks.push(buildLockdownPatch(options.workspacePath, {
+      host: options.host,
+      denyTools: options.denyTools,
+    }).trimEnd())
+  }
+  if (chunks.length > 0) await writeFile(patchFile, `${chunks.join('\n\n')}\n`, 'utf8')
 
-  return { profile, kept, dropped, unknown }
+  return { profile, kept, dropped, unknown, lockdown, lockdownExcluded }
 }
 
 async function install(profile) {
@@ -241,7 +385,9 @@ async function launch(config, profile, home, port) {
     args,
     {
       cwd: checkoutRoot(),
-      env: { ...process.env, DSH_HOME: home },
+      // 标记这是隔离实例：e2e 守卫不再把它自己的端口当成正式环境，
+      // 但 profile 里的正式入口（protectedOrigins）仍然拒绝。
+      env: { ...process.env, DSH_HOME: home, DSH_E2E_INSTANCE: '1' },
       detached: true,
       stdio: ['ignore', log, log],
     },
@@ -262,6 +408,7 @@ async function tail(file, lines = 20) {
 export async function up(config, options) {
   const dir = instancesDir(config)
   const id = String(options?.id ?? '').trim() || `e2e-${Date.now().toString(36)}`
+  assertSafeId(id)
   const wanted = (Array.isArray(options?.enable) ? options.enable : [])
     .map((name) => String(name).trim())
     .filter((name) => name.length > 0 && name !== '*')
@@ -273,12 +420,15 @@ export async function up(config, options) {
   const exclude = Array.isArray(options?.exclude) && options.exclude.length > 0
     ? options.exclude.map(String)
     : configuredExclude.filter((name) => !wanted.includes(name))
+  // 默认锁定；只有显式 lockdown:false（或配置里关掉）才放行。关掉是调试逃生门。
+  const lockdown = options?.lockdown === false ? false : config.lockdown !== false
 
   const existing = await readState(dir, id)
   if (existing && alive(existing.pid)) {
     // 同一个 id 已经在跑：组合不同就提醒，别让人以为换了 enable 会生效。
     const mismatch = JSON.stringify(existing.enable ?? []) !== JSON.stringify(wanted)
       || JSON.stringify(existing.exclude ?? []) !== JSON.stringify(exclude)
+      || existing.lockdown !== lockdown
     return { ...existing, reused: true, reusedMismatch: mismatch }
   }
   if (existing) await rm(existing.home, { recursive: true, force: true })
@@ -287,8 +437,22 @@ export async function up(config, options) {
   await mkdir(home, { recursive: true })
   const startedAt = Date.now()
   await shareCredentials(config, home)
-  const workspace = await seedWorkspace(config, home, String(options?.workspace ?? '').trim())
-  const mirrored = await mirrorProfile(config, home, exclude, wanted)
+  // 工作区固定为「当前工作区/e2e_instance/<实例名>/」，不指向当前工作区本身。
+  const workspaceRoot = String(options?.workspaceRoot ?? '').trim() || process.cwd()
+  const workspacePath = join(workspaceRoot, 'e2e_instance', id)
+  const workspace = await seedWorkspace(config, home, workspacePath)
+  let mirrored
+  try {
+    mirrored = await mirrorProfile(config, home, exclude, wanted, {
+      lockdown,
+      workspacePath,
+      host: String(config.instanceHost ?? '').trim(),
+      denyTools: config.lockdownDenyTools,
+    })
+  } catch (error) {
+    await rm(join(dir, id), { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
   await install(mirrored.profile)
 
   const port = Number(options?.port) > 0 ? Number(options.port) : await freePort()
@@ -315,11 +479,31 @@ export async function up(config, options) {
   }
 
   if (!healthy) {
-    try { process.kill(-pid, 'SIGKILL') } catch { /* already gone */ }
-    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    killTree(pid)
     const output = await tail(logFile, 30)
     await rm(join(dir, id), { recursive: true, force: true }).catch(() => {})
     throw new Error(`临时实例没起来（${url}）。日志 ${logFile}\n${output}`)
+  }
+
+  // 锁定实例必须验证插件真的装上并生效，不能把「看起来起来了、实际没锁」的实例交出去。
+  if (lockdown) {
+    const bootLog = await tail(logFile, 800)
+    if (!bootLog.includes('[dsh-e2e-lockdown] active:')) {
+      killTree(pid)
+      const output = await tail(logFile, 60)
+      await rm(join(dir, id), { recursive: true, force: true }).catch(() => {})
+      throw new Error(
+        `临时实例起来了，但限权插件没有激活；拒绝交出未锁定的实例。`
+        + `\n用 lockdown:false 只能用于调试锁定插件本身。日志 ${logFile}\n${output}`,
+      )
+    }
+    const requestedHost = String(config.instanceHost ?? '').trim()
+    if (requestedHost === '' && !/^http:\/\/127\.0\.0\.1:\d+\//u.test(url)) {
+      killTree(pid)
+      const output = await tail(logFile, 40)
+      await rm(join(dir, id), { recursive: true, force: true }).catch(() => {})
+      throw new Error(`锁定实例没有绑在回环地址（${url}）。检查 profile patch 里的 webserver.host。\n${output}`)
+    }
   }
 
   const state = {
@@ -334,6 +518,8 @@ export async function up(config, options) {
     enable: wanted,
     bundles: mirrored.kept,
     unknownEnable: mirrored.unknown,
+    lockdown,
+    lockdownExcluded: mirrored.lockdownExcluded,
     workspace: workspace ? { path: workspace.path, title: basename(workspace.path) } : null,
     createdAt: new Date().toISOString(),
     bootMs: Date.now() - startedAt,
@@ -346,6 +532,7 @@ export async function down(config, options) {
   const dir = instancesDir(config)
   const id = String(options?.id ?? '').trim()
   if (!id) throw new Error('down 需要 id（先 up，或 list 看有哪些）')
+  assertSafeId(id)
   const state = await readState(dir, id)
   if (!state) throw new Error(`没有这个临时实例：${id}`)
 
@@ -382,7 +569,9 @@ export async function list(config) {
 }
 
 export async function getInstance(config, id) {
-  const state = await readState(instancesDir(config), String(id))
+  const instanceId = String(id)
+  assertSafeId(instanceId)
+  const state = await readState(instancesDir(config), instanceId)
   if (!state) throw new Error(`没有这个临时实例：${id}`)
   if (!alive(state.pid)) throw new Error(`临时实例 ${id} 的进程已经没了；重新 up 一个`)
   return state
@@ -393,9 +582,11 @@ export function registerInstanceTool(ctx, config) {
     name: 'e2e_instance',
     description:
       '管理隔离的临时 DSH 实例，给端到端测试用：镜像当前 profile 的插件组合，'
-      + '在独立 DSH_HOME 和随机端口上跑一个 dsh web，测试完删掉，不碰用户正在用的实例和数据。'
+      + '在独立 DSH_HOME 和随机端口上跑一个 dsh web，工作区放在当前工作区的 e2e_instance/<实例名>/，测试完 down 掉，不碰用户正在用的实例和数据。'
       + '默认排除 dsh-qq-onebot（避免抢 NapCat 连接）和 dsh-webui-auth（临时环境没有凭据，会挡在设置页）。'
       + 'enable 给一组 bundle 名时只启用它们（基础组合 dsh-base / dsh-web-app 始终启用），用来隔离某个插件的回归。'
+      + '默认 lockdown：实例被锁在 workspace-write 上限、审批全部拒绝，plugin_manager / e2e / e2e_instance 等越权入口禁用；'
+      + 'lockdown:false 是调试锁定插件本身的逃生门，不要用在不可信模型上。'
       + 'up 返回 url，可直接把实例 id 传给 e2e 工具的 instance 参数。',
     parameters: {
       type: 'object',
@@ -413,7 +604,12 @@ export function registerInstanceTool(ctx, config) {
           items: { type: 'string' },
           description: 'up 时要排除的 bundle 名；不填用插件配置的 excludeBundles。显式 exclude 优先于 enable',
         },
-        port: { type: 'number', description: 'up 时指定端口；不填随机空闲端口' },
+        port: { type: 'number', description: 'up 时指定端口；不填随机空闲端口。正式端口会被拒绝' },
+        lockdown: {
+          type: 'boolean',
+          description: 'up 时是否锁定实例（默认 true）：workspace-write 上限 + 审批全拒绝 + 禁用插件/MCP 管理与越权工具。'
+            + 'false 只用于调试锁定插件本身，会留下越权能力。',
+        },
       },
       required: ['action'],
       additionalProperties: false,
@@ -435,15 +631,26 @@ export function registerInstanceTool(ctx, config) {
     async execute(args, exec) {
       const action = String(args?.action ?? '')
       if (action === 'up') {
-        // 临时实例的工作区只能是调用方会话当前的工作目录。
-        let workspace
+        if (Object.hasOwn(args ?? {}, 'workspace')) {
+          throw new Error('e2e_instance 不再接受 workspace：工作区固定在 <当前工作区>/e2e_instance/<id>/。')
+        }
+        const guards = guardConfig(ctx.get('webServer'), config)
+        const requestedPort = Number(args?.port)
+        if (Number.isInteger(requestedPort) && requestedPort > 0 && forbiddenPorts(guards).has(requestedPort)) {
+          throw new Error(
+            `e2e_instance 拒绝使用正式环境端口 ${requestedPort}；请留空让工具选随机空闲端口，`
+            + '或显式换一个测试端口。',
+          )
+        }
+        // 工作区：当前会话工作区下的 e2e_instance/<实例名>/，不把当前工作区整棵交给实例。
+        let workspaceRoot
         try {
           const wd = ctx.get('workingDirectory')
-          workspace = exec?.agent === undefined || wd === undefined
+          workspaceRoot = exec?.agent === undefined || wd === undefined
             ? undefined
             : await wd.ensure(exec.agent, exec.signal)
-        } catch { /* 拿不到就交给 up 的默认值 */ }
-        const state = await up(config, { ...args, workspace })
+        } catch { /* 拿不到就由 up 用 process.cwd() */ }
+        const state = await up(config, { ...args, workspaceRoot })
         const scope = Array.isArray(state.enable) && state.enable.length > 0
           ? `仅启用 ${state.enable.join(', ')}`
           : `${Array.isArray(state.bundles) ? state.bundles.length : 0} 个 bundle`
@@ -453,12 +660,18 @@ export function registerInstanceTool(ctx, config) {
         const stale = state.reusedMismatch === true
           ? '\n⚠ 这个实例是按另一套组合起的；要换组合先 down 再 up'
           : ''
+        const lock = state.lockdown
+          ? '\n🔒 锁定：workspace-write 上限（根固定为实例工作区），审批一律拒绝；plugin_manager 写操作 / mcp-manager / e2e / e2e_instance 已禁用'
+          : '\n⚠ 未锁定（lockdown: false）：这个实例仍可越权，只应用于调试锁定插件本身'
+        const forced = state.lockdownExcluded
+          ? '\n⚠ exclude 里的 dsh-e2e-lockdown 被忽略：锁定默认开启，要关请用 lockdown:false'
+          : ''
         return {
           ok: true,
           text: (state.reused
             ? `临时实例 ${state.id} 已经在跑：${state.url}`
-            : `临时实例 ${state.id} 已启动：${state.url}（${(state.bootMs / 1000).toFixed(1)}s，home=${state.home}）`)
-            + `\n组合：${scope}${warnings}${stale}`,
+            : `临时实例 ${state.id} 已启动：${state.url}（${(state.bootMs / 1000).toFixed(1)}s，home=${state.home}，workspace=${state.workspace?.path ?? '(none)'}）`)
+            + `\n组合：${scope}${warnings}${stale}${lock}${forced}`,
           instance: state,
         }
       }
@@ -472,7 +685,7 @@ export function registerInstanceTool(ctx, config) {
           ok: true,
           text: states.length === 0
             ? '没有临时实例'
-            : states.map((state) => `${state.id} ${state.alive ? 'running' : 'dead'} ${state.url}`).join('\n'),
+            : states.map((state) => `${state.id} ${state.alive ? 'running' : 'dead'} ${state.lockdown === false ? 'UNLOCKED' : 'locked'} ${state.url}`).join('\n'),
           instances: states,
         }
       }
