@@ -227,6 +227,16 @@ function deniedCommand(command, deny) {
   return undefined
 }
 
+/**
+ * 报告启用状态：`ctx.logger` 在正式 web 组合里没有 console transport（只有测试 fixture
+ * 会挂 `cordis-plugin-logger-console`），所以必须同时写 stdout，否则 `e2e_instance up`
+ * 在实例的启动日志里读不到 `[dsh-e2e-lockdown] active:`，会把已锁定的实例当成没锁。
+ */
+function report(ctx, line) {
+  try { ctx.logger?.info?.(line) } catch { /* logger 不可用不影响启动 */ }
+  console.info(line)
+}
+
 /** 对外的 apply：按配置决定是否启用，并把各项边界装到服务实例上。 */
 export function apply(ctx, config = {}) {
   const settings = { ...DEFAULTS, ...(config ?? {}) }
@@ -236,7 +246,7 @@ export function apply(ctx, config = {}) {
   }
   const active = mode === 'always' || (mode === 'auto' && process.env.DSH_E2E_INSTANCE === '1')
   if (!active) {
-    ctx.logger?.info?.(`[dsh-e2e-lockdown] inactive (mode=${mode}, DSH_E2E_INSTANCE=${process.env.DSH_E2E_INSTANCE ?? ''})`)
+    report(ctx, `[dsh-e2e-lockdown] inactive (mode=${mode}, DSH_E2E_INSTANCE=${process.env.DSH_E2E_INSTANCE ?? ''})`)
     return
   }
   if (settings.sandboxMode !== READ_ONLY && settings.sandboxMode !== WORKSPACE_WRITE) {
@@ -301,7 +311,8 @@ export function apply(ctx, config = {}) {
   if (probe?.mode !== lockMode(probe?.mode, lockedMode) || probe?.workspaceRoot !== root) {
     throw new Error('dsh-e2e-lockdown: self-check failed; the policy clamp did not take effect')
   }
-  ctx.logger?.info?.(
+  report(
+    ctx,
     `[dsh-e2e-lockdown] active: mode<=${lockedMode}, root=${root}, approvals=${LOCKED_APPROVAL},`
     + ` deniedTools=${[...denyTools].join(',')}`,
   )
